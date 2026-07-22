@@ -49,9 +49,6 @@ jobs:
 
   node-rust:
     name: Node Rust (${{ matrix.os }})
-    permissions:
-      contents: read
-      checks: write
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -81,12 +78,12 @@ jobs:
             xdg-utils
       - name: Set up Rust
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - name: Install pinned Rust dependency auditor
+        if: runner.os == 'Linux'
+        run: cargo install cargo-audit --locked --version 0.22.2
       - name: Audit Rust dependencies
         if: runner.os == 'Linux'
-        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          working-directory: node/src-tauri
+        run: cargo audit --file node/src-tauri/Cargo.lock
       - name: Check Rust formatting
         run: cargo fmt --manifest-path node/src-tauri/Cargo.toml -- --check
       - name: Run Clippy with warnings denied
