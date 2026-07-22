@@ -1,0 +1,66 @@
+name: Bug report
+description: Report a reproducible problem in the relay, clients, console, or node.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to file a clear, reproducible report. Do not include credentials or private payloads.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Relay Worker or API
+        - Fleet web console
+        - Desktop node
+        - TypeScript client
+        - Swift client
+        - Packaging or release tooling
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and its impact.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest reliable sequence, using synthetic data.
+      placeholder: |
+        1. Run ...
+        2. Submit ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, architecture, node version, relevant model or backend, and commit SHA when known.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs
+      description: Remove tokens, prompts, file paths, account identifiers, and private URLs before pasting logs.
+      render: shell
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials and private data from this report.
+          required: true

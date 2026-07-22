@@ -1,0 +1,43 @@
+{
+  "name": "mere-run-node",
+  "private": true,
+  "version": "0.2.10",
+  "description": "Desktop compute node for the mere.run relay.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sawfwair/relay-mere-run.git",
+    "directory": "node"
+  },
+  "homepage": "https://mere.run",
+  "bugs": {
+    "url": "https://github.com/sawfwair/relay-mere-run/issues"
+  },
+  "packageManager": "pnpm@10.34.5",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "test": "vitest run",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-autostart": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4",
+    "vitest": "^3.2.4"
+  }
+}

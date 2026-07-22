@@ -1,0 +1,46 @@
+name = "relay-mere-run"
+main = "src/index.ts"
+compatibility_date = "2025-01-14"
+compatibility_flags = ["nodejs_compat"]
+
+# Account IDs, production routes, and other deployment-specific identifiers are
+# intentionally not committed. Add them in a private Wrangler configuration.
+
+[assets]
+directory = "./web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = true
+
+# Durable Objects
+[[durable_objects.bindings]]
+name = "MERE_RUN_RELAY"
+class_name = "MereRunRelay"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["MereRunRelay"]
+
+# R2 bucket for generated assets
+[[r2_buckets]]
+binding = "IMAGES"
+bucket_name = "replace-with-your-r2-bucket"
+
+[vars]
+MERE_RUN_WEB_URL = "http://localhost:8787"
+MERE_RUN_ASSET_BASE_URL = "http://localhost:8787/media"
+BROKER_ORIGIN = "https://identity.example.com"
+WEBHOOK_TIMEOUT_MS = "30000"
+WEBHOOK_MAX_ATTEMPTS = "5"
+GRAPH_MAX_ACTIVE_JOBS = "20"
+GRAPH_MAX_ACCOUNT_STORAGE_BYTES = "107374182400"
+GRAPH_MAX_JOB_INPUT_BYTES = "53687091200"
+GRAPH_MAX_JOB_OUTPUT_BYTES = "53687091200"
+GRAPH_JOB_RETENTION_DAYS = "30"
+GRAPH_STALE_JOB_SECONDS = "21600"
+GRAPH_MAINTENANCE_INTERVAL_SECONDS = "900"
+ASR_STREAMING_ENABLED = "true"
+
+# Provision production secrets outside Git, for example:
+#   wrangler secret put WEBHOOK_SIGNING_SECRET
+#   wrangler secret put ASR_STREAM_TICKET_SECRET

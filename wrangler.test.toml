@@ -1,0 +1,28 @@
+# Test-only config for vitest-pool-workers. Secrets are visibly synthetic plain
+# variables because Miniflare cannot resolve remote secret bindings.
+name = "relay-mere-run"
+main = "src/index.ts"
+compatibility_date = "2025-01-14"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "MERE_RUN_RELAY"
+class_name = "MereRunRelay"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["MereRunRelay"]
+
+[[r2_buckets]]
+binding = "IMAGES"
+bucket_name = "test-assets"
+
+[vars]
+MERE_RUN_WEB_URL = "https://console.example.test"
+MERE_RUN_ASSET_BASE_URL = "https://assets.example.test/media"
+BROKER_ORIGIN = "https://identity.example.test"
+WEBHOOK_SIGNING_SECRET = "test-webhook-secret"
+WEBHOOK_TIMEOUT_MS = "30000"
+WEBHOOK_MAX_ATTEMPTS = "5"
+ASR_STREAMING_ENABLED = "true"
+ASR_STREAM_TICKET_SECRET = "test-asr-stream-ticket-secret-at-least-32-bytes"

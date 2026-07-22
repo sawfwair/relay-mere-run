@@ -1,0 +1,3 @@
+# Current maximum: handle_server_message. Lower this as the three reported
+# Rust hotspots are decomposed; increases fail Clippy in local and CI gates.
+cognitive-complexity-threshold = 45

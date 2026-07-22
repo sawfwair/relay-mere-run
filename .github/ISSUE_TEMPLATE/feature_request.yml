@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose a focused improvement to a supported project surface.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or operator problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Describe the desired behavior, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: contracts
+    attributes:
+      label: Contract impact
+      description: Note any expected API, protocol, queue, lease, cancellation, graph, authentication, or release impact.

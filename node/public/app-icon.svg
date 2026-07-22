@@ -1,0 +1,30 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="120" y1="60" x2="920" y2="980" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#211A4E"/>
+      <stop offset="0.5" stop-color="#4B1E9A"/>
+      <stop offset="1" stop-color="#8B2FE0"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.46" r="0.52">
+      <stop offset="0" stop-color="#B9A6FF" stop-opacity="0.55"/>
+      <stop offset="0.6" stop-color="#9C6BFF" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#9C6BFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="edge" x1="360" y1="330" x2="720" y2="700" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#D8CCFF"/>
+    </linearGradient>
+    <filter id="softshadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="22" flood-color="#0B0620" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" rx="232" fill="url(#bg)"/>
+  <circle cx="512" cy="470" r="330" fill="url(#glow)"/>
+  <g filter="url(#softshadow)">
+    <path d="M 404 352 L 404 672 L 700 512 Z" fill="#FFFFFF" fill-opacity="0.10" stroke="url(#edge)" stroke-width="46" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="404" cy="352" r="54" fill="#FFFFFF"/>
+    <circle cx="404" cy="672" r="54" fill="#FFFFFF"/>
+    <circle cx="700" cy="512" r="60" fill="#31E7D6"/>
+    <circle cx="700" cy="512" r="60" fill="none" stroke="#FFFFFF" stroke-opacity="0.35" stroke-width="6"/>
+  </g>
+</svg>

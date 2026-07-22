@@ -1,0 +1,67 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "mere.run node",
+  "mainBinaryName": "mere.run-node",
+  "version": "0.2.10",
+  "identifier": "com.mere.run.node",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "./node_modules/.bin/tsc && ./node_modules/.bin/vite build",
+    "beforeBundleCommand": "../scripts/stage-node-appimage-libraries.sh",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "mere.run node",
+        "width": 920,
+        "height": 760,
+        "minWidth": 720,
+        "minHeight": 600,
+        "maxWidth": 1280,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self' customprotocol: asset:",
+        "connect-src": "ipc: http://ipc.localhost",
+        "img-src": "'self' asset: http://asset.localhost blob: data:",
+        "style-src": "'self' 'unsafe-inline'"
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "libharfbuzz0b",
+          "libgl1",
+          "libglx0",
+          "libglvnd0"
+        ],
+        "files": {
+          "/usr/bin/mere-run-node": "linux/mere-run-node"
+        }
+      },
+      "appimage": {
+        "files": {
+          "usr/lib/libharfbuzz.so.0": ".bundle-libs/libharfbuzz.so.0",
+          "usr/lib/libGL.so.1": ".bundle-libs/libGL.so.1",
+          "usr/lib/libGLX.so.0": ".bundle-libs/libGLX.so.0",
+          "usr/lib/libGLdispatch.so.0": ".bundle-libs/libGLdispatch.so.0"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,82 @@
+{
+  "name": "relay-mere-run",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Account-scoped relay and desktop compute node for local mere.run inference.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sawfwair/relay-mere-run.git"
+  },
+  "homepage": "https://mere.run",
+  "bugs": {
+    "url": "https://github.com/sawfwair/relay-mere-run/issues"
+  },
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "build:web": "vite build --config web/vite.config.ts",
+    "dev": "vite build --config web/vite.config.ts && wrangler dev",
+    "deploy": "vite build --config web/vite.config.ts && wrangler deploy",
+    "release:node:linux": "scripts/release-node-linux.sh",
+    "release:node:macos": "scripts/release-node-macos.sh",
+    "configure:main-protection": "scripts/configure-main-protection.sh sawfwair/relay-mere-run main --apply",
+    "prepare": "lefthook install",
+    "tail": "wrangler tail",
+    "lint": "node scripts/check-complexity.mjs",
+    "check:architecture": "node scripts/check-runtime-cycles.mjs",
+    "check:complexity": "node scripts/check-complexity.mjs",
+    "check:opensource": "node scripts/check-open-source-policy.mjs",
+    "check:policy": "node scripts/check-readiness-policy.mjs",
+    "audit:dependencies": "pnpm audit --prod --audit-level=moderate && pnpm --dir node audit --prod --audit-level=moderate && cargo audit --file node/src-tauri/Cargo.lock",
+    "typecheck": "node scripts/typecheck.mjs",
+    "typecheck:worker": "tsc -p tsconfig.json --noEmit",
+    "typecheck:web": "tsc -p web/tsconfig.json --noEmit",
+    "typecheck:client": "tsc -p clients/typescript/tsconfig.json --noEmit",
+    "typecheck:test": "tsc -p test/tsconfig.json --noEmit",
+    "typecheck:node": "pnpm --dir node exec tsc",
+    "typecheck:swift": "xcrun swiftc -typecheck clients/swift/MereRunRelayClient.swift",
+    "test": "vitest run --silent",
+    "test:coverage": "vitest run --silent --coverage",
+    "test:node": "pnpm --dir node test",
+    "test:graph-simulator": "vitest run test/graph-jobs.test.ts",
+    "test:node-graph-simulator": "cargo test --manifest-path node/src-tauri/Cargo.toml graph_simulator -- --nocapture",
+    "test:watch": "vitest",
+    "check:rust": "cargo fmt --manifest-path node/src-tauri/Cargo.toml -- --check && cargo clippy --manifest-path node/src-tauri/Cargo.toml --all-targets --locked -- -D warnings -D clippy::cognitive_complexity && cargo test --manifest-path node/src-tauri/Cargo.toml --locked",
+    "verify:fast": "node scripts/verify-fast.mjs",
+    "verify:full": "pnpm verify:fast && pnpm test:coverage && pnpm build:web && pnpm --dir node build && pnpm typecheck:swift && pnpm check:rust"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.12.13",
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "@eslint/js": "^9.33.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitest/coverage-istanbul": "3.2.7",
+    "eslint": "^9.33.0",
+    "globals": "^16.3.0",
+    "lefthook": "^2.1.10",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.39.1",
+    "vite": "^7.0.4",
+    "vitest": "^3.2.7",
+    "wrangler": "^4.72.0"
+  },
+  "dependencies": {
+    "jose": "^6.2.3",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^4.4.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "lefthook",
+      "sharp",
+      "workerd"
+    ]
+  }
+}

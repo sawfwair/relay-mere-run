@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "maximumNewComplexity": 20,
+  "hotspots": {
+    "clients/typescript/MereRunRelayClient.ts::Async method 'subscribeJobStream'": 70,
+    "node/src/App.tsx::Function 'App'": 23,
+    "src/client-api.ts::Async function 'handleClientApiUnchecked'": 172,
+    "src/index.ts::Function 'parseNodeReleaseManifest'": 25,
+    "src/index.ts::Async function 'handlePublicMedia'": 25,
+    "src/index.ts::Async method 'fetch'": 46,
+    "src/relay-agent-job.ts::Async function 'handleResult'": 21,
+    "src/relay-api-graph.ts::Function 'validateCreateRequest'": 108,
+    "src/relay-api-graph.ts::Async function 'handleGraphResult'": 34,
+    "src/relay-api-graph.ts::Async function 'handleGraphNodeRequest'": 62,
+    "src/relay-asr-stream.ts::Async function 'handleAsrBrowserMessage'": 32,
+    "src/relay-fleet.ts::Function 'recordFromInfo'": 27,
+    "src/relay-fleet.ts::Async function 'updateFleetNodePolicy'": 21,
+    "src/relay-fleet.ts::Function 'activityFromStored'": 34,
+    "src/relay-fleet.ts::Function 'scoreAgentForWork'": 21,
+    "src/relay-lifecycle.ts::Async function 'failInProgressWork'": 41,
+    "src/relay-queue.ts::Function 'graphCapabilityBlockers'": 38,
+    "src/relay-queue.ts::Async function 'assignQueuedWork'": 25,
+    "src/relay-routing.ts::Async function 'handleRelayFetchUnchecked'": 130,
+    "src/relay-websocket.ts::Async function 'handleRelayWebSocketMessage'": 40,
+    "web/src/App.tsx::Function 'NodeRow'": 47
+  }
+}

@@ -1,0 +1,5 @@
+# Codebase map
+
+This repository is the Mere account relay: a Cloudflare Worker authenticates public traffic, one Durable Object per user owns scheduling/state, R2 stores media and graph artifacts, and the Tauri node performs local inference. `src/index.ts` is the edge entry; `src/MereRunRelay.ts` composes the account state machine; `src/relay-routing.ts` and `src/client-api.ts` adapt routes; `src/relay-api-*`, `src/relay-agent-*`, `src/relay-queue.ts`, and `src/relay-lifecycle.ts` own feature behavior. `src/contracts/` validates every JSON boundary. `web/` is the fleet console, `node/` the desktop agent, `clients/` public SDKs, and `test/` the Worker integration/spec suite.
+
+Run `corepack pnpm verify:fast` before pushing and `corepack pnpm verify:full` for release parity. Preserve account scoping, lease ownership, terminal cancellation, graph fingerprint/bundle bytes, and upload authorization. Do not treat source checks as deployment or artifact proof. Read `DECISIONS.md`, `src/README.md`, and the relevant feature doc before changing a protected invariant.
