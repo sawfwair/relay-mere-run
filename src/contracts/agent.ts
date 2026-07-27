@@ -80,6 +80,7 @@ export const agentCapabilitiesSchema = z.object({
     protocols: z.array(z.number()),
     input_formats: z.array(z.string()),
     max_sessions: z.number(),
+    backends: z.array(z.enum(['auto', 'parakeet', 'qwen'])).optional(),
   }).passthrough().optional(),
 }).passthrough() satisfies z.ZodType<AgentCapabilities>;
 

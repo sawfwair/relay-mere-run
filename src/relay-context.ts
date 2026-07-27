@@ -9,6 +9,7 @@ import type {
   Ocr,
   Tool,
   GraphJob,
+  AsrBackend,
 } from './types';
 
 export interface WebSocketAttachment {
@@ -23,6 +24,7 @@ export interface AsrBrowserWebSocketAttachment {
   sessionId: string;
   agentId: string;
   clientId: string;
+  backend: AsrBackend;
   connectedAtMs: number;
   startedAtMs?: number;
   readyAtMs?: number;

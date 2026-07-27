@@ -50,7 +50,8 @@ let uploaded = try await client.uploadAsrInputAudio(audioData, contentType: "aud
 let asr = try await client.asr(
     MereRunRelaySubmitAsrRequest(
         audioUrl: uploaded.url,
-        task: .transcribe
+        task: .transcribe,
+        backend: .parakeet
     )
 )
 
@@ -75,5 +76,6 @@ print(ocr.result?.text ?? "")
 - Cancel helpers are available for all async targets: `cancelJob`, `cancelTalk`, `cancelAsr`, `cancelOcr`.
 - Talk/ASR/OCR polling treats `.cancelled` as terminal.
 - `uploadAsrInputAudio` uploads audio for ASR and returns a relay URL.
+- ASR `backend` accepts `.auto`, `.parakeet`, or `.qwen`; omitted requests preserve the automatic default.
 - `uploadOcrInputImage` uploads images for OCR and returns a relay URL.
 - `talk` supports direct base64 return (`directAudio`) or URL-based delivery.

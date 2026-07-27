@@ -166,6 +166,7 @@ function isAsrRequest(value: unknown): boolean {
     && isString(value.audio_url)
     && isNullableString(value.language)
     && isOneOf(value.task, ['transcribe', 'translate'])
+    && (value.backend === undefined || isOneOf(value.backend, ['auto', 'parakeet', 'qwen']))
     && isNumber(value.max_tokens);
 }
 

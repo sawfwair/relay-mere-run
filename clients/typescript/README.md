@@ -82,7 +82,11 @@ await client.cancelTalk(finalTalk.talk_id);
 
 const audio = await fetch('/tmp/speech.wav').then((r) => r.arrayBuffer());
 const uploaded = await client.uploadAsrInputAudio(audio, 'audio/wav');
-const asrRequest: SubmitAsrRequest = { audio_url: uploaded.url, task: 'transcribe' };
+const asrRequest: SubmitAsrRequest = {
+  audio_url: uploaded.url,
+  task: 'transcribe',
+  backend: 'parakeet',
+};
 const finalAsr = await client.asr(asrRequest);
 console.log(finalAsr.result?.text);
 await client.cancelAsr(finalAsr.asr_id);
@@ -104,6 +108,7 @@ await client.cancelOcr(finalOcr.ocr_id);
 - Cancel helpers are available for all async targets: `cancelJob`, `cancelTalk`, `cancelAsr`, `cancelOcr`.
 - `uploadInputImage` accepts `Uint8Array | ArrayBuffer` for img2img prep.
 - `uploadAsrInputAudio` uploads audio for ASR and returns a relay URL.
+- ASR `backend` accepts `auto`, `parakeet`, or `qwen`; omitted requests preserve the `auto` default.
 - `uploadOcrInputImage` uploads images for OCR and returns a relay URL.
 - `talk` supports direct base64 return (`direct_audio`) or URL-based delivery.
 - HTTP responses and SSE events are validated in `runtime-contracts.ts`; a

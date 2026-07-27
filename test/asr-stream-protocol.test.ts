@@ -22,22 +22,32 @@ afterEach(() => {
   for (const socket of openSockets.splice(0)) closeWebSocket(socket);
 });
 
-function streamingCapabilities(): AgentCapabilities {
+function streamingCapabilities(
+  backends: Array<'auto' | 'parakeet' | 'qwen'> = ['parakeet', 'qwen']
+): AgentCapabilities {
   return {
     ...capabilitiesWithModels(['asr']),
     asr_streaming: {
       protocols: [1],
       input_formats: ['pcm-s16le/16000/mono'],
       max_sessions: 1,
+      backends,
     },
   };
 }
 
-async function mintTicket(relay: DurableObjectStub, userId: string): Promise<Response> {
+async function mintTicket(
+  relay: DurableObjectStub,
+  userId: string,
+  backend?: 'auto' | 'parakeet' | 'qwen'
+): Promise<Response> {
   return relay.fetch(new Request('https://relay/internal/asr/stream-ticket', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
-    body: JSON.stringify({ client_id: 'agentsmarkdown:test' }),
+    body: JSON.stringify({
+      client_id: 'agentsmarkdown:test',
+      ...(backend ? { backend } : {}),
+    }),
   }));
 }
 
@@ -112,6 +122,55 @@ describe('ASR stream protocol v1', () => {
     expect((await openStream(agent.relay, userId, ticket.ticket_id)).response.status).toBe(401);
   });
 
+  it('rejects invalid backends and selects a node advertising the requested backend', async () => {
+    const userId = `asr-backend-${crypto.randomUUID()}`;
+    const qwen = await connectAgent(userId, streamingCapabilities(['qwen']), {
+      deviceName: 'Qwen Node',
+    });
+    const parakeet = await connectAgent(userId, streamingCapabilities(['parakeet']), {
+      deviceName: 'Parakeet Node',
+    });
+    openSockets.push(qwen.ws, parakeet.ws);
+
+    const invalid = await parakeet.relay.fetch(new Request(
+      'https://relay/internal/asr/stream-ticket',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+        body: JSON.stringify({ backend: 'other' }),
+      }
+    ));
+    expect(invalid.status).toBe(400);
+
+    const issued = await mintTicket(parakeet.relay, userId, 'parakeet');
+    expect(issued.status).toBe(200);
+    expect(await readJson<{ device_label: string }>(issued)).toMatchObject({
+      device_label: 'Parakeet Node',
+    });
+  });
+
+  it('reports and routes legacy Parakeet nodes when auto selection is guaranteed', async () => {
+    const userId = `asr-legacy-backend-${crypto.randomUUID()}`;
+    const agent = await connectAgent(userId, streamingCapabilities([]), {
+      deviceName: 'Legacy Parakeet Node',
+      runtime: {
+        mere_run_version: 'mere.run 0.26.0',
+        installed_models: ['speech-asr-parakeet'],
+        inventory_status: 'reported',
+      },
+    });
+    openSockets.push(agent.ws);
+
+    const statusResponse = await agent.relay.fetch(new Request('https://relay/internal/status'));
+    const status = await readJson<{
+      agents: Array<{
+        capabilities: { asr_streaming?: { backends?: string[] } };
+      }>;
+    }>(statusResponse);
+    expect(status.agents[0].capabilities.asr_streaming?.backends).toEqual(['parakeet']);
+    expect((await mintTicket(agent.relay, userId, 'parakeet')).status).toBe(200);
+  });
+
   it('expires unused tickets, rejects the wrong owner, and refuses a second live session', async () => {
     const userId = `asr-policy-${crypto.randomUUID()}`;
     const agent = await connectAgent(userId, streamingCapabilities());
@@ -167,7 +226,9 @@ describe('ASR stream protocol v1', () => {
     const userId = `asr-route-${crypto.randomUUID()}`;
     const agent = await connectAgent(userId, streamingCapabilities());
     openSockets.push(agent.ws);
-    const ticket = await readJson<{ ticket_id: string }>(await mintTicket(agent.relay, userId));
+    const ticket = await readJson<{ ticket_id: string }>(
+      await mintTicket(agent.relay, userId, 'parakeet')
+    );
     const opened = await openStream(agent.relay, userId, ticket.ticket_id);
     const browser = opened.socket;
     expect(browser).not.toBeNull();
@@ -177,8 +238,13 @@ describe('ASR stream protocol v1', () => {
       type: 'start', protocol: 1, sampleRate: 16_000, inputFormat: 'pcm-s16le', language: 'en',
     }));
     expect(await waitForWebSocketJson(browser)).toMatchObject({ type: 'accepted', sequence: 0 });
-    const start = await waitForWebSocketJson<{ type: string; session_id: string }>(agent.ws);
+    const start = await waitForWebSocketJson<{
+      type: string;
+      session_id: string;
+      backend: string;
+    }>(agent.ws);
     expect(start.type).toBe('asr_stream_start');
+    expect(start.backend).toBe('parakeet');
 
     agent.ws.send(JSON.stringify({
       type: 'asr_stream_event',

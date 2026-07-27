@@ -19,6 +19,7 @@ import type {
   GraphPlacementBlocker,
   GraphPlacementReport,
   SchedulerMode,
+  AsrBackend,
 } from './types';
 import type { ConnectedAgentRecord, QueuedWorkDescriptor, RelayContext } from './relay-context';
 import { getInputImageKey, getInputImageUrl } from './r2';
@@ -116,8 +117,28 @@ export function supportsTalk(info: AgentInfo): boolean {
   return agentHasModel(info, 'talk-nano');
 }
 
-export function supportsAsr(info: AgentInfo): boolean {
-  return agentHasModel(info, 'asr');
+function asrBackendModel(backend: AsrBackend): string | null {
+  if (backend === 'parakeet') return 'speech-asr-parakeet';
+  if (backend === 'qwen') return 'speech-asr-qwen3';
+  return null;
+}
+
+export function supportsAsrBackend(info: AgentInfo, backend: AsrBackend): boolean {
+  if (backend === 'auto') return true;
+  const model = asrBackendModel(backend);
+  if (!model) return false;
+  if (info.capabilities.asr_streaming?.backends?.includes(backend)) return true;
+
+  // Node 0.2.10 predates backend advertisement. mere.run 0.24+ guarantees
+  // that auto transcription with an installed Parakeet model selects Parakeet.
+  return backend === 'parakeet'
+    && (info.runtime?.installed_models ?? []).includes(model)
+    && compareVersions(info.runtime?.mere_run_version ?? '', '0.24.0') >= 0;
+}
+
+export function supportsAsr(info: AgentInfo, asr?: Asr): boolean {
+  if (!agentHasModel(info, 'asr') && !agentHasModelPrefix(info, 'speech-asr-')) return false;
+  return supportsAsrBackend(info, asr?.request.backend ?? 'auto');
 }
 
 export function supportsEmbed(info: AgentInfo): boolean {
@@ -317,7 +338,10 @@ export function graphPlacementReport(
 }
 
 function compareVersions(left: string, right: string): number {
-  const parse = (value: string): number[] => value.split('.').slice(0, 3).map((part) => Number.parseInt(part, 10) || 0);
+  const parse = (value: string): number[] => {
+    const version = value.match(/\d+(?:\.\d+){0,2}/u)?.[0] ?? '';
+    return version.split('.').slice(0, 3).map((part) => Number.parseInt(part, 10) || 0);
+  };
   const lhs = parse(left);
   const rhs = parse(right);
   for (let index = 0; index < Math.max(lhs.length, rhs.length); index++) {
@@ -351,8 +375,8 @@ export function hasCapableAgentForTalk(ctx: RelayContext): boolean {
   return anyCapableAgent(ctx, supportsTalk);
 }
 
-export function hasCapableAgentForAsr(ctx: RelayContext): boolean {
-  return anyCapableAgent(ctx, supportsAsr);
+export function hasCapableAgentForAsr(ctx: RelayContext, asr?: Asr): boolean {
+  return anyCapableAgent(ctx, (info) => supportsAsr(info, asr));
 }
 
 export function hasCapableAgentForEmbed(ctx: RelayContext): boolean {
@@ -820,7 +844,12 @@ export async function assignTalkToAgent(ctx: RelayContext, talk: Talk): Promise<
 }
 
 export async function assignAsrToAgent(ctx: RelayContext, asr: Asr): Promise<boolean> {
-  const agent = await getOnlineAgent(ctx, supportsAsr, 'asr');
+  const preferredModel = asrBackendModel(asr.request.backend ?? 'auto') ?? 'asr';
+  const agent = await getOnlineAgent(
+    ctx,
+    (info) => supportsAsr(info, asr),
+    preferredModel
+  );
   if (!agent) {
     return false;
   }

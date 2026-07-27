@@ -264,6 +264,7 @@ export interface TalkStatusResponse {
 }
 
 export type AsrTask = 'transcribe' | 'translate';
+export type AsrBackend = 'auto' | 'parakeet' | 'qwen';
 export type AsrStatus = 'queued' | 'processing' | 'complete' | 'failed' | 'cancelled';
 export type EmbedStatus = 'queued' | 'processing' | 'complete' | 'failed' | 'cancelled';
 
@@ -271,6 +272,7 @@ export interface AsrRequest {
   audio_url: string;
   language: string | null;
   task: AsrTask;
+  backend?: AsrBackend;
   max_tokens: number;
 }
 
@@ -302,6 +304,7 @@ export interface SubmitAsrRequest {
   audio_url: string;
   language?: string;
   task?: AsrTask;
+  backend?: AsrBackend;
   max_tokens?: number;
 }
 

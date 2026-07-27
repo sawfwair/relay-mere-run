@@ -14,8 +14,9 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::protocol::{
-    AsrOutput, AsrRequest, AsrStreamingCapabilities, ChatMessage, ChatRequest, EmbedDataRow,
-    EmbedOutput, EmbedRequest, JobKind, JobRequest, ModelInventoryStatus, RuntimeDiagnostic,
+    AsrBackend, AsrOutput, AsrRequest, AsrStreamingCapabilities, ChatMessage, ChatRequest,
+    EmbedDataRow, EmbedOutput, EmbedRequest, JobKind, JobRequest, ModelInventoryStatus,
+    RuntimeDiagnostic,
 };
 
 const DEFAULT_MODEL: &str = "image-klein-9b";
@@ -149,6 +150,8 @@ struct MereRunStatusCapabilities {
     asr_streaming_protocols: Vec<u32>,
     #[serde(default, rename = "asrStreamingInputFormats")]
     asr_streaming_input_formats: Vec<String>,
+    #[serde(default, rename = "asrStreamingBackends")]
+    asr_streaming_backends: Vec<String>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -222,6 +225,7 @@ fn parse_status_capability_models(stdout: &str) -> Vec<String> {
 
 fn parse_asr_streaming_capabilities(stdout: &str) -> Option<AsrStreamingCapabilities> {
     let status = serde_json::from_str::<MereRunStatus>(stdout).ok()?;
+    let installed_models = installed_model_ids(&status.installed_models);
     let capabilities = status.capabilities?;
     if !capabilities.asr_streaming_protocols.contains(&1)
         || !capabilities
@@ -235,6 +239,28 @@ fn parse_asr_streaming_capabilities(stdout: &str) -> Option<AsrStreamingCapabili
         protocols: vec![1],
         input_formats: vec!["pcm-s16le/16000/mono".to_string()],
         max_sessions: 1,
+        backends: capabilities
+            .asr_streaming_backends
+            .into_iter()
+            .filter_map(|backend| match backend.as_str() {
+                "auto" => Some(AsrBackend::Auto),
+                "parakeet"
+                    if installed_models
+                        .iter()
+                        .any(|model| model == "speech-asr-parakeet") =>
+                {
+                    Some(AsrBackend::Parakeet)
+                }
+                "qwen"
+                    if installed_models
+                        .iter()
+                        .any(|model| model == "speech-asr-qwen3") =>
+                {
+                    Some(AsrBackend::Qwen)
+                }
+                _ => None,
+            })
+            .collect(),
     })
 }
 
@@ -1009,7 +1035,7 @@ fn build_transcribe_args(audio_path: &Path, req: &AsrRequest) -> Vec<String> {
         "transcribe".to_string(),
         audio_path.to_string_lossy().to_string(),
         "--backend".to_string(),
-        "auto".to_string(),
+        req.backend.as_str().to_string(),
         "--task".to_string(),
         req.task.clone(),
         "--quiet".to_string(),
@@ -1374,6 +1400,21 @@ mod tests {
     fn advertises_streaming_only_from_protocol_one_status() {
         let supported = parse_asr_streaming_capabilities(
             r#"{
+          "installedModels": [
+            { "id": "speech-asr-parakeet", "category": "speech-asr" }
+          ],
+          "capabilities": {
+            "asrStreamingProtocols": [1],
+            "asrStreamingInputFormats": ["pcm-s16le/16000/mono"],
+            "asrStreamingBackends": ["parakeet", "qwen", "future"]
+          }
+        }"#,
+        )
+        .expect("streaming capability");
+        assert_eq!(supported.protocols, vec![1]);
+        assert_eq!(supported.backends, vec![AsrBackend::Parakeet]);
+        let legacy = parse_asr_streaming_capabilities(
+            r#"{
           "installedModels": [],
           "capabilities": {
             "asrStreamingProtocols": [1],
@@ -1381,8 +1422,8 @@ mod tests {
           }
         }"#,
         )
-        .expect("streaming capability");
-        assert_eq!(supported.protocols, vec![1]);
+        .expect("legacy streaming capability");
+        assert!(legacy.backends.is_empty());
         assert!(parse_asr_streaming_capabilities(
             r#"{
           "installedModels": [],
@@ -1544,6 +1585,7 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
             audio_url: "https://example.com/audio.wav".to_string(),
             language: Some("en".to_string()),
             task: "transcribe".to_string(),
+            backend: AsrBackend::Parakeet,
             max_tokens: 448,
         };
         let args = build_transcribe_args(Path::new("/tmp/audio.wav"), &req);
@@ -1554,7 +1596,7 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
                 "transcribe",
                 "/tmp/audio.wav",
                 "--backend",
-                "auto",
+                "parakeet",
                 "--task",
                 "transcribe",
                 "--quiet",

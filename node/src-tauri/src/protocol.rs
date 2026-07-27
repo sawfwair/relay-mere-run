@@ -28,6 +28,27 @@ pub struct AsrStreamingCapabilities {
     pub protocols: Vec<u32>,
     pub input_formats: Vec<String>,
     pub max_sessions: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backends: Vec<AsrBackend>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AsrBackend {
+    #[default]
+    Auto,
+    Parakeet,
+    Qwen,
+}
+
+impl AsrBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Parakeet => "parakeet",
+            Self::Qwen => "qwen",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -520,6 +541,8 @@ pub struct AsrRequest {
     #[serde(default = "default_asr_task")]
     pub task: String,
     #[serde(default)]
+    pub backend: AsrBackend,
+    #[serde(default)]
     pub max_tokens: u32,
 }
 
@@ -654,6 +677,8 @@ pub enum ServerMessage {
         protocol: u32,
         sample_rate: u32,
         input_format: String,
+        #[serde(default)]
+        backend: AsrBackend,
         #[serde(default)]
         language: Option<String>,
     },

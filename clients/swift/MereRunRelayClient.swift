@@ -72,6 +72,12 @@ public enum MereRunRelayAsrTask: String, Codable, Sendable {
     case translate
 }
 
+public enum MereRunRelayAsrBackend: String, Codable, Sendable {
+    case auto
+    case parakeet
+    case qwen
+}
+
 public enum MereRunRelayAsrStatus: String, Codable, Sendable {
     case queued
     case processing
@@ -342,17 +348,20 @@ public struct MereRunRelaySubmitAsrRequest: Codable, Sendable {
     public var audioUrl: String
     public var language: String?
     public var task: MereRunRelayAsrTask?
+    public var backend: MereRunRelayAsrBackend?
     public var maxTokens: Int?
 
     public init(
         audioUrl: String,
         language: String? = nil,
         task: MereRunRelayAsrTask? = .transcribe,
+        backend: MereRunRelayAsrBackend? = nil,
         maxTokens: Int? = nil
     ) {
         self.audioUrl = audioUrl
         self.language = language
         self.task = task
+        self.backend = backend
         self.maxTokens = maxTokens
     }
 }
@@ -368,6 +377,7 @@ public struct MereRunRelayAsrRequestPayload: Codable, Sendable {
     public let audioUrl: String
     public let language: String?
     public let task: MereRunRelayAsrTask
+    public let backend: MereRunRelayAsrBackend?
     public let maxTokens: Int
 }
 
