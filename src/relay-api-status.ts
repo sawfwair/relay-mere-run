@@ -1,13 +1,26 @@
 import type { RelayContext } from './relay-context';
-import type { StatusResponse } from './types';
+import type { AgentCapabilities, AgentInfo, StatusResponse } from './types';
 import { failStaleAgentWork } from './relay-lifecycle';
-import { countQueuedWork } from './relay-queue';
+import { countQueuedWork, supportsAsrBackend } from './relay-queue';
 
 const STALE_AGENT_TIMEOUT_MS = 2 * 60 * 1000;
 
 async function cleanupStaleAgents(ctx: RelayContext): Promise<void> {
   await failStaleAgentWork(ctx, ctx.getConnectedAgents(), STALE_AGENT_TIMEOUT_MS);
   await ctx.assignQueuedWork();
+}
+
+function statusCapabilities(info: AgentInfo): AgentCapabilities {
+  const streaming = info.capabilities.asr_streaming;
+  if (!streaming || streaming.backends?.length) return info.capabilities;
+  if (!supportsAsrBackend(info, 'parakeet')) return info.capabilities;
+  return {
+    ...info.capabilities,
+    asr_streaming: {
+      ...streaming,
+      backends: ['parakeet'],
+    },
+  };
 }
 
 export function acceptAgentWebSocket(ctx: RelayContext, request: Request): Response {
@@ -28,7 +41,7 @@ export async function handleStatus(ctx: RelayContext): Promise<Response> {
     status: agent.info.status,
     last_seen: agent.info.last_ping,
     current_job_id: agent.info.current_job_id,
-    capabilities: agent.info.capabilities,
+    capabilities: statusCapabilities(agent.info),
   }));
 
   const response: StatusResponse = {

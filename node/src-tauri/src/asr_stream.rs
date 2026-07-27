@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, watch, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::mererun;
-use crate::protocol::AgentMessage;
+use crate::protocol::{AgentMessage, AsrBackend};
 use crate::work_gate::{DeviceWorkGate, WorkPermit};
 
 const HEADER_BYTES: usize = 44;
@@ -61,6 +61,7 @@ impl LiveAsrSessions {
         protocol: u32,
         sample_rate: u32,
         input_format: String,
+        backend: AsrBackend,
         language: Option<String>,
     ) {
         if !valid_session_id(&session_id)
@@ -106,6 +107,8 @@ impl LiveAsrSessions {
             .arg("pcm-s16le")
             .arg("--sample-rate")
             .arg("16000")
+            .arg("--backend")
+            .arg(backend.as_str())
             .arg("--jsonl")
             .arg("--quiet")
             .stdin(std::process::Stdio::piped())

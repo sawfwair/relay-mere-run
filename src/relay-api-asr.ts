@@ -25,6 +25,7 @@ export async function handleSubmitAsr(
     audio_url: request.audio_url,
     language: request.language ?? null,
     task: request.task ?? 'transcribe',
+    backend: request.backend ?? 'auto',
     max_tokens: request.max_tokens ?? 448,
   };
 
@@ -53,7 +54,7 @@ export async function handleSubmitAsr(
       ctx.asrs.delete(asrId);
     },
     assign: () => assignAsrToAgent(ctx, asr),
-    hasCapableAgent: () => hasCapableAgentForAsr(ctx),
+    hasCapableAgent: () => hasCapableAgentForAsr(ctx, asr),
     getQueuePosition: () => getAsrQueuePosition(ctx, asrId),
     buildAssignedResponse: () => ({
       asr_id: asrId,

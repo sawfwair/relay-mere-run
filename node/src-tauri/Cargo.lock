@@ -2106,7 +2106,7 @@ dependencies = [
 
 [[package]]
 name = "mere-run-node"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

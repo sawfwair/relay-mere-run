@@ -988,6 +988,7 @@ describe('relay regressions', () => {
       const assignment = await waitForWebSocketJson<JsonRecord>(ws);
       expect(assignment.type).toBe('asr_request');
       expect(assignment.asr_id).toBe(asrId);
+      expect(assignment.request).toMatchObject({ backend: 'auto' });
 
       const tokenAlignments = [
         {
@@ -1035,6 +1036,56 @@ describe('relay regressions', () => {
       });
     } finally {
       closeWebSocket(ws);
+    }
+  });
+
+  it('routes explicit Parakeet ASR through current and legacy-compatible nodes', async () => {
+    const userId = newUserId('asr-parakeet');
+    const { relay, ws } = await connectAgent(
+      userId,
+      capabilitiesWithModels(['asr']),
+      {
+        runtime: {
+          mere_run_version: 'mere.run 0.26.0',
+          installed_models: ['speech-asr-parakeet'],
+          inventory_status: 'reported',
+        },
+      }
+    );
+    try {
+      const response = await submitAsr(relay, userId, {
+        audio_url: 'https://example.com/audio.wav',
+        task: 'transcribe',
+        backend: 'parakeet',
+      });
+      expect(response.status).toBe(200);
+      const assignment = await waitForWebSocketJson<JsonRecord>(ws);
+      expect(assignment.type).toBe('asr_request');
+      expect(assignment.request).toMatchObject({ backend: 'parakeet' });
+    } finally {
+      closeWebSocket(ws);
+    }
+
+    const oldUserId = newUserId('asr-parakeet-old');
+    const old = await connectAgent(
+      oldUserId,
+      capabilitiesWithModels(['asr']),
+      {
+        runtime: {
+          mere_run_version: 'mere.run 0.23.0',
+          installed_models: ['speech-asr-parakeet'],
+          inventory_status: 'reported',
+        },
+      }
+    );
+    try {
+      const response = await submitAsr(old.relay, oldUserId, {
+        audio_url: 'https://example.com/audio.wav',
+        backend: 'parakeet',
+      });
+      expect(response.status).toBe(503);
+    } finally {
+      closeWebSocket(old.ws);
     }
   });
 

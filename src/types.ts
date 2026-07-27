@@ -38,7 +38,10 @@ export interface AsrStreamingCapabilities {
   protocols: number[];
   input_formats: string[];
   max_sessions: number;
+  backends?: AsrBackend[];
 }
+
+export type AsrBackend = 'auto' | 'parakeet' | 'qwen';
 
 export interface GraphWorkerCapabilities {
   schema_version: number;
@@ -1210,6 +1213,7 @@ export interface AsrRequest {
   audio_url: string;
   language: string | null;
   task: 'transcribe' | 'translate';
+  backend?: AsrBackend;
   max_tokens: number;
 }
 
@@ -1284,6 +1288,7 @@ export interface SubmitAsrRequest {
   audio_url: string;
   language?: string;
   task?: 'transcribe' | 'translate';
+  backend?: AsrBackend;
   max_tokens?: number;
   webhook_url?: string;
 }

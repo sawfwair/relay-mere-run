@@ -1170,10 +1170,18 @@ async fn handle_server_message<R: Runtime>(
             protocol,
             sample_rate,
             input_format,
+            backend,
             language,
         } => {
             live_asr
-                .start(session_id, protocol, sample_rate, input_format, language)
+                .start(
+                    session_id,
+                    protocol,
+                    sample_rate,
+                    input_format,
+                    backend,
+                    language,
+                )
                 .await;
         }
         ServerMessage::AsrStreamStop { session_id } => {

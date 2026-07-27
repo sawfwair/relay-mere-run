@@ -61,6 +61,7 @@ export const submitAsrRequestSchema = z.object({
   audio_url: z.string(),
   language: z.string().optional(),
   task: z.enum(['transcribe', 'translate']).optional(),
+  backend: z.enum(['auto', 'parakeet', 'qwen']).optional(),
   max_tokens: z.number().optional(),
   webhook_url: z.string().optional(),
 }).passthrough() satisfies z.ZodType<SubmitAsrRequest>;
@@ -97,7 +98,10 @@ export const submitToolRequestSchema = z.object({
 }).passthrough() satisfies z.ZodType<SubmitToolRequest>;
 
 export const graphClientEnvelopeSchema = z.record(z.string(), z.unknown());
-export const asrStreamTicketRequestSchema = z.object({ client_id: z.unknown().optional() }).passthrough();
+export const asrStreamTicketRequestSchema = z.object({
+  client_id: z.unknown().optional(),
+  backend: z.enum(['auto', 'parakeet', 'qwen']).optional(),
+}).passthrough();
 
 export const submitJobInternalSchema = submitJobRequestSchema.extend({
   client_id: z.string(),

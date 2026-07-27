@@ -7,9 +7,11 @@ import type {
 } from './relay-context';
 import { isAsrBrowserWebSocketAttachment } from './relay-context';
 import { ASR_STREAM_ALARM_KEY, scheduleNextRelayAlarm } from './relay-alarm';
-import { parseJson, readRequestJson } from './json';
+import { invalidJsonResponse, parseJson } from './json';
 import { asrStreamTicketRequestSchema } from './contracts/requests';
 import { unknownRecordSchema } from './contracts/primitives';
+import { supportsAsrBackend } from './relay-queue';
+import type { AsrBackend } from './types';
 
 const PROTOCOL = 1;
 const INPUT_FORMAT = 'pcm-s16le/16000/mono';
@@ -25,6 +27,7 @@ interface StoredAsrTicket {
   userId: string;
   clientId: string;
   agentId: string;
+  backend?: AsrBackend;
   protocol: number;
   expiresAtMs: number;
 }
@@ -107,7 +110,11 @@ export async function openAsrTicket(
   }
 }
 
-function compatibleAgent(ctx: RelayContext, agentId?: string): ConnectedAgentRecord | undefined {
+function compatibleAgent(
+  ctx: RelayContext,
+  backend: AsrBackend,
+  agentId?: string
+): ConnectedAgentRecord | undefined {
   return Array.from(ctx.getConnectedAgents().values()).find(({ info }) => {
     const capability = info.capabilities.asr_streaming;
     return (!agentId || info.agent_id === agentId)
@@ -115,7 +122,8 @@ function compatibleAgent(ctx: RelayContext, agentId?: string): ConnectedAgentRec
       && info.current_job_id === null
       && capability?.protocols.includes(PROTOCOL)
       && capability.input_formats.includes(INPUT_FORMAT)
-      && capability.max_sessions >= 1;
+      && capability.max_sessions >= 1
+      && supportsAsrBackend(info, backend);
   });
 }
 
@@ -124,13 +132,20 @@ export async function createAsrStreamTicket(ctx: RelayContext, request: Request)
     return Response.json({ error: 'ASR streaming is disabled' }, { status: 503 });
   }
   let clientId = 'browser';
-  try {
-    const body = await readRequestJson(request, asrStreamTicketRequestSchema);
-    if (typeof body.client_id === 'string' && body.client_id.trim()) clientId = body.client_id.trim();
-  } catch {
-    // An empty JSON body is valid; client identity remains the authenticated browser default.
+  let backend: AsrBackend = 'auto';
+  const requestBody = await request.text();
+  if (requestBody.trim()) {
+    try {
+      const body = parseJson(requestBody, asrStreamTicketRequestSchema);
+      if (typeof body.client_id === 'string' && body.client_id.trim()) clientId = body.client_id.trim();
+      backend = body.backend ?? 'auto';
+    } catch (error) {
+      const response = invalidJsonResponse(error);
+      if (response) return response;
+      throw error;
+    }
   }
-  const agent = compatibleAgent(ctx);
+  const agent = compatibleAgent(ctx, backend);
   if (!agent) return Response.json({ error: 'No compatible idle ASR node' }, { status: 409 });
 
   const ticketId = crypto.randomUUID();
@@ -139,6 +154,7 @@ export async function createAsrStreamTicket(ctx: RelayContext, request: Request)
     userId: ctx.getRequestUserId(request),
     clientId,
     agentId: agent.info.agent_id,
+    backend,
     protocol: PROTOCOL,
     expiresAtMs,
   };
@@ -169,7 +185,8 @@ export async function acceptAsrBrowserWebSocket(ctx: RelayContext, request: Requ
   if (ticket.userId !== ctx.getRequestUserId(request)) {
     return new Response('Stream ticket owner mismatch', { status: 403 });
   }
-  if (!compatibleAgent(ctx, ticket.agentId)) {
+  const backend = ticket.backend ?? 'auto';
+  if (!compatibleAgent(ctx, backend, ticket.agentId)) {
     return new Response('Selected ASR node is no longer idle', { status: 409 });
   }
 
@@ -181,6 +198,7 @@ export async function acceptAsrBrowserWebSocket(ctx: RelayContext, request: Requ
     sessionId: crypto.randomUUID(),
     agentId: ticket.agentId,
     clientId: ticket.clientId,
+    backend,
     connectedAtMs: now,
     lastAudioAtMs: now,
     forwardedAudioBytes: 0,
@@ -306,6 +324,7 @@ export async function handleAsrBrowserMessage(
         protocol: PROTOCOL,
         sample_rate: 16_000,
         input_format: 'pcm-s16le',
+        backend: attachment.backend,
         language: typeof control.language === 'string' ? control.language : undefined,
       }));
       await scheduleAsrStreamAlarm(ctx);
