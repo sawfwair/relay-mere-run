@@ -1,6 +1,6 @@
 [package]
 name = "mere-run-node"
-version = "0.2.12"
+version = "0.2.13"
 description = "mere.run node — a generation node for the mere.run relay"
 authors = ["mere.run"]
 license = "MIT"
