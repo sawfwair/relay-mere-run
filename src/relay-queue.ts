@@ -123,17 +123,48 @@ function asrBackendModel(backend: AsrBackend): string | null {
   return null;
 }
 
-export function supportsAsrBackend(info: AgentInfo, backend: AsrBackend): boolean {
-  if (backend === 'auto') return true;
+function agentReportsInstalledModel(info: AgentInfo, model: string): boolean {
+  return agentHasModel(info, model)
+    || (info.runtime?.installed_models ?? []).some((candidate) =>
+      normalizeModelName(candidate) === normalizeModelName(model)
+    );
+}
+
+function supportsConcreteAsrBackend(
+  info: AgentInfo,
+  backend: Exclude<AsrBackend, 'auto'>
+): boolean {
+  if (info.capabilities.asr_streaming?.backends?.includes(backend)) return true;
   const model = asrBackendModel(backend);
   if (!model) return false;
-  if (info.capabilities.asr_streaming?.backends?.includes(backend)) return true;
 
   // Node 0.2.10 predates backend advertisement. mere.run 0.24+ guarantees
   // that auto transcription with an installed Parakeet model selects Parakeet.
   return backend === 'parakeet'
-    && (info.runtime?.installed_models ?? []).includes(model)
+    && agentReportsInstalledModel(info, model)
     && compareVersions(info.runtime?.mere_run_version ?? '', '0.24.0') >= 0;
+}
+
+export function resolveAsrBackend(
+  info: AgentInfo,
+  backend: AsrBackend
+): Exclude<AsrBackend, 'auto'> | null {
+  if (backend !== 'auto') {
+    return supportsConcreteAsrBackend(info, backend) ? backend : null;
+  }
+  if (supportsConcreteAsrBackend(info, 'parakeet')) return 'parakeet';
+  if (
+    supportsConcreteAsrBackend(info, 'qwen')
+    || agentReportsInstalledModel(info, 'speech-asr-qwen3')
+    || agentHasModel(info, 'asr')
+  ) {
+    return 'qwen';
+  }
+  return null;
+}
+
+export function supportsAsrBackend(info: AgentInfo, backend: AsrBackend): boolean {
+  return resolveAsrBackend(info, backend) !== null;
 }
 
 export function supportsAsr(info: AgentInfo, asr?: Asr): boolean {

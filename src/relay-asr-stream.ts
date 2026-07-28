@@ -10,7 +10,7 @@ import { ASR_STREAM_ALARM_KEY, scheduleNextRelayAlarm } from './relay-alarm';
 import { invalidJsonResponse, parseJson } from './json';
 import { asrStreamTicketRequestSchema } from './contracts/requests';
 import { unknownRecordSchema } from './contracts/primitives';
-import { supportsAsrBackend } from './relay-queue';
+import { resolveAsrBackend } from './relay-queue';
 import type { AsrBackend } from './types';
 
 const PROTOCOL = 1;
@@ -30,6 +30,11 @@ interface StoredAsrTicket {
   backend?: AsrBackend;
   protocol: number;
   expiresAtMs: number;
+}
+
+interface AsrAgentSelection {
+  agent: ConnectedAgentRecord;
+  backend: Exclude<AsrBackend, 'auto'>;
 }
 
 interface SealedTicketPayload {
@@ -114,17 +119,21 @@ function compatibleAgent(
   ctx: RelayContext,
   backend: AsrBackend,
   agentId?: string
-): ConnectedAgentRecord | undefined {
-  return Array.from(ctx.getConnectedAgents().values()).find(({ info }) => {
+): AsrAgentSelection | undefined {
+  for (const agent of ctx.getConnectedAgents().values()) {
+    const { info } = agent;
     const capability = info.capabilities.asr_streaming;
-    return (!agentId || info.agent_id === agentId)
+    const compatible = (!agentId || info.agent_id === agentId)
       && info.status === 'online'
       && info.current_job_id === null
       && capability?.protocols.includes(PROTOCOL)
       && capability.input_formats.includes(INPUT_FORMAT)
-      && capability.max_sessions >= 1
-      && supportsAsrBackend(info, backend);
-  });
+      && capability.max_sessions >= 1;
+    if (!compatible) continue;
+    const resolvedBackend = resolveAsrBackend(info, backend);
+    if (resolvedBackend) return { agent, backend: resolvedBackend };
+  }
+  return undefined;
 }
 
 export async function createAsrStreamTicket(ctx: RelayContext, request: Request): Promise<Response> {
@@ -145,16 +154,16 @@ export async function createAsrStreamTicket(ctx: RelayContext, request: Request)
       throw error;
     }
   }
-  const agent = compatibleAgent(ctx, backend);
-  if (!agent) return Response.json({ error: 'No compatible idle ASR node' }, { status: 409 });
+  const selection = compatibleAgent(ctx, backend);
+  if (!selection) return Response.json({ error: 'No compatible idle ASR node' }, { status: 409 });
 
   const ticketId = crypto.randomUUID();
   const expiresAtMs = Date.now() + TICKET_TTL_MS;
   const ticket: StoredAsrTicket = {
     userId: ctx.getRequestUserId(request),
     clientId,
-    agentId: agent.info.agent_id,
-    backend,
+    agentId: selection.agent.info.agent_id,
+    backend: selection.backend,
     protocol: PROTOCOL,
     expiresAtMs,
   };
@@ -163,7 +172,8 @@ export async function createAsrStreamTicket(ctx: RelayContext, request: Request)
   return Response.json({
     ticket_id: ticketId,
     protocol: PROTOCOL,
-    device_label: agent.info.device_name,
+    device_label: selection.agent.info.device_name,
+    backend: selection.backend,
     expires_at_ms: expiresAtMs,
   });
 }
@@ -185,10 +195,11 @@ export async function acceptAsrBrowserWebSocket(ctx: RelayContext, request: Requ
   if (ticket.userId !== ctx.getRequestUserId(request)) {
     return new Response('Stream ticket owner mismatch', { status: 403 });
   }
-  const backend = ticket.backend ?? 'auto';
-  if (!compatibleAgent(ctx, backend, ticket.agentId)) {
+  const selection = compatibleAgent(ctx, ticket.backend ?? 'auto', ticket.agentId);
+  if (!selection) {
     return new Response('Selected ASR node is no longer idle', { status: 409 });
   }
+  const backend = selection.backend;
 
   const pair = new WebSocketPair();
   const [client, server] = Object.values(pair);

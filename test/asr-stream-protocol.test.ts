@@ -23,10 +23,11 @@ afterEach(() => {
 });
 
 function streamingCapabilities(
-  backends: Array<'auto' | 'parakeet' | 'qwen'> = ['parakeet', 'qwen']
+  backends: Array<'auto' | 'parakeet' | 'qwen'> = ['parakeet', 'qwen'],
+  models: string[] = ['asr']
 ): AgentCapabilities {
   return {
-    ...capabilitiesWithModels(['asr']),
+    ...capabilitiesWithModels(models),
     asr_streaming: {
       protocols: [1],
       input_formats: ['pcm-s16le/16000/mono'],
@@ -144,8 +145,30 @@ describe('ASR stream protocol v1', () => {
 
     const issued = await mintTicket(parakeet.relay, userId, 'parakeet');
     expect(issued.status).toBe(200);
-    expect(await readJson<{ device_label: string }>(issued)).toMatchObject({
+    expect(await readJson<{ device_label: string; backend: string }>(issued)).toMatchObject({
       device_label: 'Parakeet Node',
+      backend: 'parakeet',
+    });
+  });
+
+  it('resolves auto to a ready backend and rejects model-less streaming nodes', async () => {
+    const noModelUser = `asr-no-model-${crypto.randomUUID()}`;
+    const noModel = await connectAgent(noModelUser, streamingCapabilities([], []), {
+      deviceName: 'Model-less Node',
+    });
+    openSockets.push(noModel.ws);
+    expect((await mintTicket(noModel.relay, noModelUser)).status).toBe(409);
+
+    const qwenUser = `asr-auto-qwen-${crypto.randomUUID()}`;
+    const qwen = await connectAgent(qwenUser, streamingCapabilities(['qwen']), {
+      deviceName: 'Qwen Node',
+    });
+    openSockets.push(qwen.ws);
+    const issued = await mintTicket(qwen.relay, qwenUser);
+    expect(issued.status).toBe(200);
+    expect(await readJson<{ device_label: string; backend: string }>(issued)).toMatchObject({
+      device_label: 'Qwen Node',
+      backend: 'qwen',
     });
   });
 
@@ -168,7 +191,9 @@ describe('ASR stream protocol v1', () => {
       }>;
     }>(statusResponse);
     expect(status.agents[0].capabilities.asr_streaming?.backends).toEqual(['parakeet']);
-    expect((await mintTicket(agent.relay, userId, 'parakeet')).status).toBe(200);
+    const issued = await mintTicket(agent.relay, userId, 'parakeet');
+    expect(issued.status).toBe(200);
+    expect(await readJson<{ backend: string }>(issued)).toMatchObject({ backend: 'parakeet' });
   });
 
   it('expires unused tickets, rejects the wrong owner, and refuses a second live session', async () => {

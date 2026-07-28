@@ -7,6 +7,7 @@ import {
   capabilitiesWithModels,
   closeWebSocket,
   connectAgent,
+  getRelay,
   readJson,
   submitAsr,
   submitChat,
@@ -1037,6 +1038,19 @@ describe('relay regressions', () => {
     } finally {
       closeWebSocket(ws);
     }
+  });
+
+  it('rejects unsupported Parakeet translation before queueing', async () => {
+    const userId = newUserId('asr-parakeet-translate');
+    const response = await submitAsr(getRelay(userId), userId, {
+      audio_url: 'https://example.com/audio.wav',
+      task: 'translate',
+      backend: 'parakeet',
+    });
+    expect(response.status).toBe(400);
+    const body = await readJson<{ error: string; details: string }>(response);
+    expect(body.error).toBe('Invalid JSON payload');
+    expect(body.details).toContain('Parakeet does not support translation');
   });
 
   it('routes explicit Parakeet ASR through current and legacy-compatible nodes', async () => {

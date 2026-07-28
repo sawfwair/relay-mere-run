@@ -49,7 +49,8 @@ desktop entry, icons, and required GTK, WebKitGTK, HarfBuzz, and GLVND runtime
 packages through `apt`:
 
 ```sh
-sudo apt install ./mere.run-node-0.2.5-arm64.deb
+VERSION="$(node -p "require('./node/package.json').version")"
+sudo apt install "./mere.run-node-${VERSION}-arm64.deb"
 mere.run-node
 ```
 
@@ -57,8 +58,9 @@ Use the AppImage on other distributions or when installation without root is
 preferred:
 
 ```sh
-chmod +x mere.run-node-0.2.5-arm64.AppImage
-./mere.run-node-0.2.5-arm64.AppImage
+VERSION="$(node -p "require('./node/package.json').version")"
+chmod +x "mere.run-node-${VERSION}-arm64.AppImage"
+"./mere.run-node-${VERSION}-arm64.AppImage"
 ```
 
 Never launch the node itself with `sudo`.
@@ -114,12 +116,13 @@ retaining the AppImage fallback.
 Overrides remain available for externally built artifacts:
 
 ```sh
+VERSION="$(node -p "require('./node/package.json').version")"
 NODE_LINUX_ARCH=arm64 \
-NODE_LINUX_ARTIFACT_PATH="node/src-tauri/target/release/bundle/deb/mere.run node_0.2.5_arm64.deb" \
+NODE_LINUX_ARTIFACT_PATH="node/src-tauri/target/release/bundle/deb/mere.run node_${VERSION}_arm64.deb" \
 ./scripts/release-node-linux-deb.sh
 
 NODE_LINUX_ARCH=arm64 \
-NODE_LINUX_ARTIFACT_PATH="node/src-tauri/target/release/bundle/appimage/mere.run node_0.2.5_arm64.AppImage" \
+NODE_LINUX_ARTIFACT_PATH="node/src-tauri/target/release/bundle/appimage/mere.run node_${VERSION}_arm64.AppImage" \
 ./scripts/release-node-linux.sh
 ```
 

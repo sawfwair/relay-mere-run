@@ -64,7 +64,15 @@ export const submitAsrRequestSchema = z.object({
   backend: z.enum(['auto', 'parakeet', 'qwen']).optional(),
   max_tokens: z.number().optional(),
   webhook_url: z.string().optional(),
-}).passthrough() satisfies z.ZodType<SubmitAsrRequest>;
+}).passthrough().superRefine((request, context) => {
+  if (request.backend === 'parakeet' && request.task === 'translate') {
+    context.addIssue({
+      code: 'custom',
+      message: 'Parakeet does not support translation',
+      path: ['task'],
+    });
+  }
+}) satisfies z.ZodType<SubmitAsrRequest>;
 
 export const submitEmbedRequestSchema = z.object({
   texts: z.array(z.string()),
