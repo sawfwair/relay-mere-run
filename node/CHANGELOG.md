@@ -1,5 +1,16 @@
 # mere.run Node changelog
 
+## 0.2.12 - 2026-07-28
+
+- Handle Relay `talk_request` jobs through the installed
+  `mere.run speech synthesize` runtime so clients such as AgentsMarkdown can
+  read documents aloud.
+- Advertise `talk-nano` only when the Qwen3-TTS checkpoint is installed and the
+  local `mere.run` binary exposes speech synthesis.
+- Return uploaded or inline WAV audio with measured duration and sample rate.
+- Cooperatively cancel the TTS child process when Relay cancels a talk or the
+  Node supervisor stops.
+
 ## 0.2.11 - 2026-07-28
 
 - Advertise installed Parakeet and Qwen live-ASR backends from the local

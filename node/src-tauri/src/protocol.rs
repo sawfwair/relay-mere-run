@@ -406,6 +406,24 @@ pub enum AgentMessage {
         chat_id: String,
         error: String,
     },
+    TalkResponse {
+        talk_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        owner_user_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        audio_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        audio_data: Option<String>,
+        duration_seconds: f64,
+        sample_rate: u32,
+        output_format: String,
+    },
+    TalkError {
+        talk_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        owner_user_id: Option<String>,
+        error: String,
+    },
     AsrResponse {
         asr_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -530,6 +548,54 @@ pub struct ChatRequest {
     pub use_lora: Option<bool>,
     #[serde(default)]
     pub model: Option<String>,
+}
+
+/// Speech synthesis request parameters (relay `TalkRequest`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TalkRequest {
+    pub text: String,
+    #[serde(default)]
+    pub voice_description: Option<String>,
+    #[serde(default = "default_talk_speed")]
+    pub speed: f32,
+    #[serde(default = "default_talk_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_talk_output_format")]
+    pub output_format: String,
+}
+
+fn default_talk_speed() -> f32 {
+    1.0
+}
+
+fn default_talk_temperature() -> f32 {
+    0.6
+}
+
+fn default_talk_output_format() -> String {
+    "wav".to_string()
+}
+
+/// Talk-specific relay messages are decoded separately from the legacy
+/// generation dispatcher so adding the modality does not grow its match loop.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TalkServerMessage {
+    TalkRequest {
+        talk_id: String,
+        #[serde(default)]
+        client_id: String,
+        owner_user_id: String,
+        upload_url: String,
+        #[serde(default)]
+        direct_audio: bool,
+        request: TalkRequest,
+    },
+    TalkCancel {
+        talk_id: String,
+    },
+    #[serde(other)]
+    Other,
 }
 
 /// Speech transcription request parameters (relay `AsrRequest`).
@@ -708,7 +774,7 @@ pub enum ServerMessage {
         plan_id: String,
     },
     InventoryRequest,
-    /// Catch-all for modalities this node does not yet handle (talk / ocr).
+    /// Catch-all for modalities this node does not yet handle (OCR).
     #[serde(other)]
     Other,
 }
@@ -763,6 +829,76 @@ mod inventory_tests {
         assert_eq!(value["runtime"]["installed_models"][0], "image-krea2-raw");
         assert_eq!(value["runtime"]["inventory_status"], "reported");
         assert_eq!(value["runtime"]["diagnostic"], "version_command_failed");
+    }
+
+    #[test]
+    fn decodes_talk_request_and_cancel() {
+        let message: TalkServerMessage = serde_json::from_str(
+            r#"{
+              "type": "talk_request",
+              "talk_id": "talk_123",
+              "client_id": "client_123",
+              "owner_user_id": "user_123",
+              "upload_url": "https://relay.example/api/audio-upload/user_123/talk_123",
+              "direct_audio": false,
+              "request": {
+                "text": "Hello from mere.run.",
+                "voice_description": "A warm narrator",
+                "speed": 1.0,
+                "temperature": 0.5,
+                "output_format": "wav"
+              }
+            }"#,
+        )
+        .expect("talk request should decode");
+        match message {
+            TalkServerMessage::TalkRequest {
+                talk_id,
+                request,
+                direct_audio,
+                ..
+            } => {
+                assert_eq!(talk_id, "talk_123");
+                assert_eq!(request.text, "Hello from mere.run.");
+                assert_eq!(
+                    request.voice_description.as_deref(),
+                    Some("A warm narrator")
+                );
+                assert_eq!(request.speed, 1.0);
+                assert_eq!(request.temperature, 0.5);
+                assert_eq!(request.output_format, "wav");
+                assert!(!direct_audio);
+            }
+            _ => panic!("expected talk request"),
+        }
+
+        let cancel: TalkServerMessage =
+            serde_json::from_str(r#"{"type":"talk_cancel","talk_id":"talk_123"}"#)
+                .expect("talk cancel should decode");
+        assert!(matches!(
+            cancel,
+            TalkServerMessage::TalkCancel { talk_id } if talk_id == "talk_123"
+        ));
+    }
+
+    #[test]
+    fn encodes_talk_response_contract() {
+        let message = AgentMessage::TalkResponse {
+            talk_id: "talk_123".to_string(),
+            owner_user_id: Some("user_123".to_string()),
+            audio_url: Some("https://assets.example/talk.wav".to_string()),
+            audio_data: None,
+            duration_seconds: 1.25,
+            sample_rate: 24_000,
+            output_format: "wav".to_string(),
+        };
+        let value = serde_json::to_value(message).expect("talk response JSON");
+        assert_eq!(value["type"], "talk_response");
+        assert_eq!(value["talk_id"], "talk_123");
+        assert_eq!(value["owner_user_id"], "user_123");
+        assert_eq!(value["sample_rate"], 24_000);
+        assert_eq!(value["output_format"], "wav");
+        assert!(value.get("audio_data").is_none());
     }
 }
 

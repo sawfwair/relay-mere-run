@@ -29,12 +29,13 @@ use crate::protocol::{
     AgentAvailability, AgentCapabilities, AgentCapacity, AgentMessage, AgentRuntimeInfo,
     AgentSystemInfo, AsrRequest, AsrStreamingCapabilities, ChatRequest, GraphWorkerCapabilities,
     JobKind, JobRequest, ModelInventoryStatus, PluginCapability, RuntimeDiagnostic, ServerMessage,
-    ToolRequest,
+    TalkRequest, TalkServerMessage, ToolRequest,
 };
 use crate::work_gate::DeviceWorkGate;
 
 type ActiveGraphJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type ActiveModelPlans = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
+type ActiveTalkJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type ActiveToolJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 
 async fn send_graph_completion(
@@ -557,6 +558,7 @@ async fn connect_and_serve<R: Runtime>(
 
     let active_graphs = ActiveGraphJobs::default();
     let active_model_plans = ActiveModelPlans::default();
+    let active_talks = ActiveTalkJobs::default();
     let active_tools = ActiveToolJobs::default();
     let live_asr = LiveAsrSessions::new(work_gate.clone(), out_tx.clone());
     let mut request_tasks = JoinSet::new();
@@ -626,6 +628,28 @@ async fn connect_and_serve<R: Runtime>(
                             }
                             continue;
                         }
+                        if is_talk_message(&txt) {
+                            let task_app = app.clone();
+                            let task_out = out_tx.clone();
+                            let task_talks = active_talks.clone();
+                            let task_work_gate = work_gate.clone();
+                            request_tasks.spawn(async move {
+                                if let Err(e) = handle_talk_server_message(
+                                    TalkExecutionContext {
+                                        app: &task_app,
+                                        out_tx: &task_out,
+                                        active_talks: &task_talks,
+                                        work_gate: &task_work_gate,
+                                    },
+                                    &txt,
+                                ).await {
+                                    emit(&task_app, "node:log", serde_json::json!({
+                                        "level": "error", "message": format!("{e}")
+                                    }));
+                                }
+                            });
+                            continue;
+                        }
                         let task_app = app.clone();
                         let task_out = out_tx.clone();
                         let task_graphs = active_graphs.clone();
@@ -668,6 +692,9 @@ async fn connect_and_serve<R: Runtime>(
     for cancel in active_model_plans.lock().await.values() {
         let _ = cancel.send(true);
     }
+    for cancel in active_talks.lock().await.values() {
+        let _ = cancel.send(true);
+    }
     for cancel in active_tools.lock().await.values() {
         let _ = cancel.send(true);
     }
@@ -694,6 +721,20 @@ async fn connect_and_serve<R: Runtime>(
 }
 
 fn is_live_asr_control(text: &str) -> bool {
+    message_type(text).is_some_and(|message_type| {
+        matches!(
+            message_type.as_str(),
+            "asr_stream_start" | "asr_stream_stop" | "asr_stream_cancel"
+        )
+    })
+}
+
+fn is_talk_message(text: &str) -> bool {
+    message_type(text)
+        .is_some_and(|message_type| matches!(message_type.as_str(), "talk_request" | "talk_cancel"))
+}
+
+fn message_type(text: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(text)
         .ok()
         .and_then(|value| {
@@ -701,12 +742,6 @@ fn is_live_asr_control(text: &str) -> bool {
                 .get("type")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string)
-        })
-        .is_some_and(|message_type| {
-            matches!(
-                message_type.as_str(),
-                "asr_stream_start" | "asr_stream_stop" | "asr_stream_cancel"
-            )
         })
 }
 
@@ -1400,6 +1435,169 @@ async fn run_chat(req: &ChatRequest) -> Result<String> {
     mererun::chat_text(req).await
 }
 
+struct TalkExecutionContext<'a, R: Runtime> {
+    app: &'a AppHandle<R>,
+    out_tx: &'a mpsc::UnboundedSender<Message>,
+    active_talks: &'a ActiveTalkJobs,
+    work_gate: &'a DeviceWorkGate,
+}
+
+async fn handle_talk_server_message<R: Runtime>(
+    context: TalkExecutionContext<'_, R>,
+    text: &str,
+) -> Result<()> {
+    match serde_json::from_str::<TalkServerMessage>(text)? {
+        TalkServerMessage::TalkRequest {
+            talk_id,
+            client_id,
+            owner_user_id,
+            upload_url,
+            direct_audio,
+            request,
+        } => {
+            execute_talk_request(
+                context,
+                talk_id,
+                client_id,
+                owner_user_id,
+                upload_url,
+                direct_audio,
+                request,
+            )
+            .await
+        }
+        TalkServerMessage::TalkCancel { talk_id } => {
+            if let Some(cancel) = context.active_talks.lock().await.get(&talk_id) {
+                let _ = cancel.send(true);
+            }
+            emit(
+                context.app,
+                "node:log",
+                serde_json::json!({
+                    "level": "info", "message": format!("talk cancel requested for {talk_id}")
+                }),
+            );
+            Ok(())
+        }
+        TalkServerMessage::Other => Ok(()),
+    }
+}
+
+async fn execute_talk_request<R: Runtime>(
+    context: TalkExecutionContext<'_, R>,
+    talk_id: String,
+    client_id: String,
+    owner_user_id: String,
+    upload_url: String,
+    direct_audio: bool,
+    request: TalkRequest,
+) -> Result<()> {
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    {
+        let mut active = context.active_talks.lock().await;
+        if active.contains_key(&talk_id) {
+            return Err(anyhow!("talk {talk_id} is already running"));
+        }
+        active.insert(talk_id.clone(), cancel_tx);
+    }
+
+    let _work_permit = context.work_gate.acquire("relay", &talk_id).await;
+    emit(
+        context.app,
+        "node:job",
+        serde_json::json!({
+            "job_id": talk_id, "kind": "talk", "state": "started",
+            "client_id": client_id, "prompt": request.text, "model": "speech-tts-qwen3-nano",
+        }),
+    );
+
+    let result = build_talk_result(
+        &talk_id,
+        &owner_user_id,
+        &upload_url,
+        direct_audio,
+        &request,
+        cancel_rx,
+    )
+    .await;
+    context.active_talks.lock().await.remove(&talk_id);
+    let state = match &result {
+        AgentMessage::TalkResponse { .. } => "done",
+        AgentMessage::TalkError { error, .. } if error == "speech synthesis cancelled" => {
+            "cancelled"
+        }
+        _ => "failed",
+    };
+    context
+        .out_tx
+        .send(Message::Text(serde_json::to_string(&result)?.into()))?;
+    emit(
+        context.app,
+        "node:job",
+        serde_json::json!({
+            "job_id": talk_id,
+            "kind": "talk",
+            "state": state,
+        }),
+    );
+    Ok(())
+}
+
+async fn build_talk_result(
+    talk_id: &str,
+    owner_user_id: &str,
+    upload_url: &str,
+    direct_audio: bool,
+    request: &TalkRequest,
+    cancel: watch::Receiver<bool>,
+) -> AgentMessage {
+    let out_dir = std::env::temp_dir().join("mere-run-node").join("talk");
+    let outcome: Result<(Option<String>, Option<String>, f64, u32)> = async {
+        let speech = mererun::synthesize_speech(request, &out_dir, talk_id, cancel).await?;
+        let delivery: Result<(Option<String>, Option<String>)> = async {
+            let bytes = tokio::fs::read(&speech.path).await?;
+            if direct_audio {
+                Ok((
+                    None,
+                    Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                ))
+            } else {
+                Ok((
+                    Some(upload_output(upload_url, "audio/wav", bytes).await?),
+                    None,
+                ))
+            }
+        }
+        .await;
+        let _ = tokio::fs::remove_file(&speech.path).await;
+        let delivery = delivery?;
+        Ok((
+            delivery.0,
+            delivery.1,
+            speech.duration_seconds,
+            speech.sample_rate,
+        ))
+    }
+    .await;
+
+    match outcome {
+        Ok((audio_url, audio_data, duration_seconds, sample_rate)) => AgentMessage::TalkResponse {
+            talk_id: talk_id.to_string(),
+            owner_user_id: Some(owner_user_id.to_string()),
+            audio_url,
+            audio_data,
+            duration_seconds,
+            sample_rate,
+            output_format: "wav".to_string(),
+        },
+        Err(error) => AgentMessage::TalkError {
+            talk_id: talk_id.to_string(),
+            owner_user_id: Some(owner_user_id.to_string()),
+            error: error.to_string(),
+        },
+    }
+}
+
 async fn run_tool(
     req: &ToolRequest,
     tool_id: &str,
@@ -1416,6 +1614,8 @@ async fn upload_output(upload_url: &str, content_type: &str, bytes: Vec<u8>) -> 
         image_url: String,
         #[serde(default)]
         media_url: String,
+        #[serde(default)]
+        audio_url: String,
     }
     let client = reqwest::Client::new();
     let resp = client
@@ -1430,6 +1630,8 @@ async fn upload_output(upload_url: &str, content_type: &str, bytes: Vec<u8>) -> 
     let parsed: UploadResponse = resp.json().await?;
     if !parsed.media_url.is_empty() {
         Ok(parsed.media_url)
+    } else if !parsed.audio_url.is_empty() {
+        Ok(parsed.audio_url)
     } else {
         Ok(parsed.image_url)
     }

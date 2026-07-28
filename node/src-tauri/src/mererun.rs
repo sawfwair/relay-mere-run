@@ -11,24 +11,28 @@ use std::process::{Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::protocol::{
     AsrBackend, AsrOutput, AsrRequest, AsrStreamingCapabilities, ChatMessage, ChatRequest,
     EmbedDataRow, EmbedOutput, EmbedRequest, JobKind, JobRequest, ModelInventoryStatus,
-    RuntimeDiagnostic,
+    RuntimeDiagnostic, TalkRequest,
 };
 
 const DEFAULT_MODEL: &str = "image-klein-9b";
 const DEFAULT_EMBED_MODEL: &str = "text-embed-qwen3-0.6b";
+const DEFAULT_TTS_MODEL: &str = "speech-tts-qwen3-nano";
 const IMAGE_CAPABILITY: &str = "image";
 const TEXT_CAPABILITY: &str = "text";
 const MUSIC_CAPABILITY: &str = "music";
 const VIDEO_CAPABILITY: &str = "video";
 const ASR_CAPABILITY: &str = "asr";
 const EMBED_CAPABILITY: &str = "embed";
-const ADVERTISABLE_MODEL_CATEGORIES: &[&str] = &["image", "text-chat", "music", "video"];
-const ADVERTISABLE_MODEL_PREFIXES: &[&str] = &["image-", "text-chat-", "music-", "video-"];
+const TALK_CAPABILITY: &str = "talk-nano";
+const ADVERTISABLE_MODEL_CATEGORIES: &[&str] =
+    &["image", "text-chat", "music", "video", "speech-tts"];
+const ADVERTISABLE_MODEL_PREFIXES: &[&str] =
+    &["image-", "text-chat-", "music-", "video-", "speech-tts-"];
 const MAX_ASR_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
 
 fn push_unique(models: &mut Vec<String>, model: impl Into<String>) {
@@ -436,6 +440,7 @@ pub async fn capability_models(configured: &[String]) -> Vec<String> {
 }
 
 async fn capability_models_from(base: Vec<String>) -> Vec<String> {
+    let has_tts_model = base.iter().any(|model| model.starts_with("speech-tts-"));
     let mut models = Vec::new();
     for model in base {
         push_unique(&mut models, model);
@@ -461,6 +466,10 @@ async fn capability_models_from(base: Vec<String>) -> Vec<String> {
         push_unique(&mut models, ASR_CAPABILITY);
     }
 
+    if has_tts_model && command_supports(&["speech", "synthesize", "--help"]).await {
+        push_unique(&mut models, TALK_CAPABILITY);
+    }
+
     if command_supports(&["text", "embed", "--help"]).await {
         push_unique(&mut models, EMBED_CAPABILITY);
         push_unique(&mut models, DEFAULT_EMBED_MODEL);
@@ -472,6 +481,13 @@ pub struct GeneratedOutput {
     pub path: PathBuf,
     pub content_type: &'static str,
     pub kind: &'static str,
+}
+
+#[derive(Debug)]
+pub struct SynthesizedSpeech {
+    pub path: PathBuf,
+    pub duration_seconds: f64,
+    pub sample_rate: u32,
 }
 
 /// A per-step generation progress update, in relay terms: `step` counts 1..=N
@@ -875,6 +891,152 @@ pub async fn generate_video(req: &JobRequest, out_dir: &Path, job_id: &str) -> R
         ));
     }
     Ok(out_path)
+}
+
+fn speech_synthesis_command(binary: &Path, req: &TalkRequest, output: &Path) -> Result<Command> {
+    if req.text.trim().is_empty() {
+        return Err(anyhow!("speech synthesis text is empty"));
+    }
+    if req.output_format != "wav" {
+        return Err(anyhow!(
+            "unsupported speech output format: {}",
+            req.output_format
+        ));
+    }
+    if (req.speed - 1.0).abs() > f32::EPSILON {
+        return Err(anyhow!(
+            "mere.run speech synthesis currently supports speed 1.0"
+        ));
+    }
+    if !req.temperature.is_finite() {
+        return Err(anyhow!("speech synthesis temperature must be finite"));
+    }
+
+    let mut command = Command::new(binary);
+    command
+        .arg("speech")
+        .arg("synthesize")
+        .arg(&req.text)
+        .arg("--model")
+        .arg(DEFAULT_TTS_MODEL)
+        .arg("--output")
+        .arg(output)
+        .arg("--temperature")
+        .arg(req.temperature.to_string())
+        .arg("--quiet");
+    if let Some(voice) = req
+        .voice_description
+        .as_deref()
+        .map(str::trim)
+        .filter(|voice| !voice.is_empty())
+    {
+        command.arg("--voice").arg(voice);
+    }
+    Ok(command)
+}
+
+fn read_wav_u32(bytes: &[u8], offset: usize) -> Result<u32> {
+    let value = bytes
+        .get(offset..offset + 4)
+        .ok_or_else(|| anyhow!("truncated WAV metadata"))?;
+    Ok(u32::from_le_bytes(
+        value.try_into().expect("four-byte WAV field"),
+    ))
+}
+
+fn wav_metadata(bytes: &[u8]) -> Result<(u32, f64)> {
+    if bytes.get(0..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"WAVE") || bytes.len() < 12 {
+        return Err(anyhow!("mere.run produced an invalid WAV file"));
+    }
+
+    let mut sample_rate = None;
+    let mut byte_rate = None;
+    let mut data_bytes = None;
+    let mut offset = 12usize;
+    while offset + 8 <= bytes.len() {
+        let chunk_id = &bytes[offset..offset + 4];
+        let chunk_size = read_wav_u32(bytes, offset + 4)? as usize;
+        let data_offset = offset + 8;
+        let data_end = data_offset
+            .checked_add(chunk_size)
+            .ok_or_else(|| anyhow!("invalid WAV chunk size"))?;
+        if data_end > bytes.len() {
+            return Err(anyhow!("truncated WAV chunk"));
+        }
+        if chunk_id == b"fmt " {
+            if chunk_size < 16 {
+                return Err(anyhow!("invalid WAV format chunk"));
+            }
+            sample_rate = Some(read_wav_u32(bytes, data_offset + 4)?);
+            byte_rate = Some(read_wav_u32(bytes, data_offset + 8)?);
+        } else if chunk_id == b"data" {
+            data_bytes = Some(chunk_size as u64);
+        }
+        offset = data_end + (chunk_size % 2);
+    }
+
+    let sample_rate = sample_rate.ok_or_else(|| anyhow!("WAV sample rate is missing"))?;
+    let byte_rate = byte_rate.ok_or_else(|| anyhow!("WAV byte rate is missing"))?;
+    let data_bytes = data_bytes.ok_or_else(|| anyhow!("WAV audio data is missing"))?;
+    if sample_rate == 0 || byte_rate == 0 {
+        return Err(anyhow!("invalid WAV sample or byte rate"));
+    }
+    Ok((sample_rate, data_bytes as f64 / f64::from(byte_rate)))
+}
+
+pub async fn synthesize_speech(
+    req: &TalkRequest,
+    out_dir: &Path,
+    talk_id: &str,
+    cancel: watch::Receiver<bool>,
+) -> Result<SynthesizedSpeech> {
+    let binary = resolve_mere_run_binary().await;
+    synthesize_speech_with_binary(req, out_dir, talk_id, cancel, &binary).await
+}
+
+async fn synthesize_speech_with_binary(
+    req: &TalkRequest,
+    out_dir: &Path,
+    talk_id: &str,
+    mut cancel: watch::Receiver<bool>,
+    binary: &Path,
+) -> Result<SynthesizedSpeech> {
+    tokio::fs::create_dir_all(out_dir).await?;
+    let output_path = out_dir.join(format!("{talk_id}.wav"));
+    let mut command = speech_synthesis_command(binary, req, &output_path)?;
+    command.kill_on_drop(true);
+    let child = command.spawn()?;
+    let output = child.wait_with_output();
+    tokio::pin!(output);
+
+    let command_output = loop {
+        tokio::select! {
+            result = &mut output => break result?,
+            changed = cancel.changed() => {
+                if changed.is_err() || *cancel.borrow() {
+                    let _ = tokio::fs::remove_file(&output_path).await;
+                    return Err(anyhow!("speech synthesis cancelled"));
+                }
+            }
+        }
+    };
+
+    if !command_output.status.success() {
+        let _ = tokio::fs::remove_file(&output_path).await;
+        let stderr = String::from_utf8_lossy(&command_output.stderr);
+        return Err(anyhow!(
+            "mere.run speech synthesize failed: {}",
+            stderr.trim()
+        ));
+    }
+
+    let bytes = tokio::fs::read(&output_path).await?;
+    let (sample_rate, duration_seconds) = wav_metadata(&bytes)?;
+    Ok(SynthesizedSpeech {
+        path: output_path,
+        duration_seconds,
+        sample_rate,
+    })
 }
 
 /// Download the ASR input to a per-job temp file and invoke `mere.run speech transcribe`.
@@ -1368,6 +1530,7 @@ mod tests {
                 { "id": "text-chat-gemma4", "category": "text-chat", "size": "11 GB" },
                 { "id": "music-acestep", "category": "music", "size": "10 GB" },
                 { "id": "video-ltx23-av-mlx", "category": "video", "size": "48 GB" },
+                { "id": "speech-tts-qwen3-nano", "category": "speech-tts", "size": "4.57 GB" },
                 { "id": "speech-asr-qwen3", "category": "speech-asr", "size": "2.47 GB" },
                 { "id": "text-embed-qwen3-0.6b", "category": "text-embed", "size": "1.21 GB" },
                 { "id": "sfx-woosh-flow", "category": "sfx", "size": "5 GB" }
@@ -1381,7 +1544,8 @@ mod tests {
                 "image-klein-nano",
                 "text-chat-gemma4",
                 "music-acestep",
-                "video-ltx23-av-mlx"
+                "video-ltx23-av-mlx",
+                "speech-tts-qwen3-nano"
             ]
         );
     }
@@ -1496,6 +1660,7 @@ image-klein-max                  image           missing    —
 text-chat-gemma4                 text-chat       installed  11 GB
 music-acestep                    music           installed  10 GB
 video-ltx23-av-mlx               video           installed  48 GB
+speech-tts-qwen3-nano            speech-tts      installed  4.57 GB
 speech-asr-qwen3                 speech-asr      installed  2.47 GB
 text-embed-qwen3-0.6b            text-embed      installed  1.21 GB
 sfx-woosh-flow                   sfx             installed  5 GB"#,
@@ -1507,7 +1672,8 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
                 "image-klein-nano",
                 "text-chat-gemma4",
                 "music-acestep",
-                "video-ltx23-av-mlx"
+                "video-ltx23-av-mlx",
+                "speech-tts-qwen3-nano"
             ]
         );
     }
@@ -1521,6 +1687,7 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
             "text-chat-gemma4".to_string(),
             "music-acestep".to_string(),
             "video-ltx23-av-mlx".to_string(),
+            "speech-tts-qwen3-nano".to_string(),
             "sfx-woosh-flow".to_string(),
             "image-zimage-max".to_string(),
         ]);
@@ -1532,9 +1699,131 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
                 "text-chat-gemma4",
                 "music-acestep",
                 "video-ltx23-av-mlx",
+                "speech-tts-qwen3-nano",
                 "image-zimage-max"
             ]
         );
+    }
+
+    #[test]
+    fn builds_speech_synthesis_command_without_running_inference() {
+        let request = TalkRequest {
+            text: "Hello from the relay.".to_string(),
+            voice_description: Some("A warm, clear narrator".to_string()),
+            speed: 1.0,
+            temperature: 0.5,
+            output_format: "wav".to_string(),
+        };
+        let command = speech_synthesis_command(
+            Path::new("/usr/local/bin/mere.run"),
+            &request,
+            Path::new("/tmp/talk_123.wav"),
+        )
+        .expect("speech command");
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            vec![
+                "speech",
+                "synthesize",
+                "Hello from the relay.",
+                "--model",
+                "speech-tts-qwen3-nano",
+                "--output",
+                "/tmp/talk_123.wav",
+                "--temperature",
+                "0.5",
+                "--quiet",
+                "--voice",
+                "A warm, clear narrator",
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_wav_sample_rate_and_duration() {
+        let data_bytes = 48_000u32;
+        let mut wav = Vec::with_capacity(44 + data_bytes as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&24_000u32.to_le_bytes());
+        wav.extend_from_slice(&48_000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_bytes.to_le_bytes());
+        wav.resize(44 + data_bytes as usize, 0);
+
+        let (sample_rate, duration) = wav_metadata(&wav).expect("WAV metadata");
+        assert_eq!(sample_rate, 24_000);
+        assert!((duration - 1.0).abs() < f64::EPSILON);
+        assert!(wav_metadata(b"not a wave file").is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_terminates_speech_child() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = format!(
+            "mere-run-node-talk-cancel-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).expect("create test directory");
+        let fake_binary = dir.join("mere.run");
+        std::fs::write(&fake_binary, "#!/bin/sh\nexec sleep 30\n").expect("write fake runtime");
+        let mut permissions = std::fs::metadata(&fake_binary)
+            .expect("fake runtime metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_binary, permissions).expect("make fake runtime executable");
+
+        let request = TalkRequest {
+            text: "This job should be cancelled.".to_string(),
+            voice_description: None,
+            speed: 1.0,
+            temperature: 0.6,
+            output_format: "wav".to_string(),
+        };
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let task_dir = dir.clone();
+        let task_binary = fake_binary.clone();
+        let task = tokio::spawn(async move {
+            synthesize_speech_with_binary(
+                &request,
+                &task_dir,
+                "talk_cancel",
+                cancel_rx,
+                &task_binary,
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel_tx.send(true).expect("send cancellation");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("cancelled child should exit promptly")
+            .expect("speech task should join");
+
+        assert_eq!(
+            result.expect_err("speech should be cancelled").to_string(),
+            "speech synthesis cancelled"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

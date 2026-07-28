@@ -3,9 +3,10 @@
 A cross-platform Tauri desktop app that turns any device with `mere.run`
 installed into a **local processing node** for the [mere.run relay](../). It connects
 to `relay.mere.run` as a device agent, advertises the models the machine has,
-and services image, ASR, embedding, and plugin tool jobs by driving local
-`mere.run` plus installed `mere-*` companion plugins — so any app that submits
-jobs to the relay (animatic included) can be served from this device.
+and services image, speech synthesis, ASR, embedding, and plugin tool jobs by
+driving local `mere.run` plus installed `mere-*` companion plugins — so any app
+that submits jobs to the relay (animatic included) can be served from this
+device.
 
 It also advertises the public graph-worker contract. Portable graph jobs are
 downloaded with strict size and SHA-256 verification, executed through
@@ -21,19 +22,21 @@ The Rust core (`src-tauri/src/`) is the relay device agent:
 - `protocol.rs` — wire types mirroring `relay-mere-run/src/types.ts`.
 - `agent.rs` — opens a WebSocket to `wss://relay.mere.run/agent` with
   `Authorization: Bearer <token>`, sends `auth` + capabilities, then for each
-  `job`, `chat_request`, `asr_request`, `embed_request`, or `tool_request`
-  message drives `mere.run` or the requested plugin, streams progress, uploads
-  results to the relay upload URL, and replies with the matching result/error
-  message. It reports hardware, runtime, installed-model inventory, capacity,
-  and live power/memory/thermal telemetry; pings every 20s and auto-reconnects.
-  The relay can request a live inventory rescan without reconnecting the node.
+  `job`, `chat_request`, `talk_request`, `asr_request`, `embed_request`, or
+  `tool_request` message drives `mere.run` or the requested plugin, streams
+  progress, uploads results to the relay upload URL, and replies with the
+  matching result/error message. It reports hardware, runtime, installed-model
+  inventory, capacity, and live power/memory/thermal telemetry; pings every 20s
+  and auto-reconnects. The relay can request a live inventory rescan without
+  reconnecting the node.
 - `hardware.rs` — inventories CPU, memory, Apple Metal/unified memory,
   NVIDIA CUDA/VRAM, ROCm, power, battery, and thermal state using portable OS
   data plus vendor tools when available.
 - `mererun.rs` — wraps the local `mere.run` binary
   (`mere.run image generate --prompt … --model … --output … --width … --height …
-  --seed … [--ref-image …]`, `mere.run speech transcribe --backend …`, and
-  `mere.run text embed`) and discovers models/capabilities via `mere.run`.
+  --seed … [--ref-image …]`, `mere.run speech synthesize`,
+  `mere.run speech transcribe --backend …`, and `mere.run text embed`) and
+  discovers models/capabilities via `mere.run`.
   Live ASR advertises only installed Parakeet and Qwen backends. Relay resolves
   automatic stream tickets to a ready backend before audio starts, while
   explicit requests remain pinned through the Node protocol and child command.
@@ -165,15 +168,16 @@ power-efficient scheduling.
 Working: connect, auth, capability advertise, persistent hardware/runtime/model
 inventory and telemetry, lease-aware retry, image/music/video jobs via
 `mere.run`, correct img2img (`--input`/`--strength`), chat via `mere.run text
-chat`, batch and live ASR with explicit Parakeet/Qwen routing, embedding via
-`mere.run text embed`, plugin tool jobs via installed `mere-*` companions,
-result routing (POST outputs to relay upload endpoints, then send the returned
-public URLs), per-step image progress, ping, reconnect, live UI.
+chat`, Qwen speech synthesis, batch and live ASR with explicit Parakeet/Qwen
+routing, embedding via `mere.run text embed`, plugin tool jobs via installed
+`mere-*` companions, result routing (POST outputs to relay upload endpoints,
+then send the returned public URLs), per-step image progress, ping, reconnect,
+live UI.
 
 Notes / next:
 - `mere.run api serve` is **chat/embedding only** — there is no warm image
   server to wrap, so spawning `mere.run image generate` per image job is the
   correct path for image.
-- Handle the remaining modalities the relay routes (talk / ocr).
+- Handle the remaining OCR modality routed by the relay.
 - Real `capabilities` (max_resolution, lora, controlnet) probed from `mere.run`
   rather than hard-coded defaults.
