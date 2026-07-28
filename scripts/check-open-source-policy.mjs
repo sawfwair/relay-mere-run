@@ -96,7 +96,8 @@ for (const requirement of [
   'actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6',
   'pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6',
   'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7',
-  'rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0',
+  'cargo install cargo-audit --locked --version 0.22.2',
+  'cargo audit --file node/src-tauri/Cargo.lock',
   'pnpm audit --prod --audit-level=moderate',
   'pnpm --dir node audit --prod --audit-level=moderate',
 ]) {
