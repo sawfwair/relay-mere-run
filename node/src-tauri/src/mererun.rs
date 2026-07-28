@@ -194,6 +194,16 @@ fn configured_capability_models(configured: &[String]) -> Vec<String> {
     models
 }
 
+fn include_installed_tts_models(mut configured: Vec<String>, installed: &[String]) -> Vec<String> {
+    for model in installed
+        .iter()
+        .filter(|model| model.starts_with("speech-tts-"))
+    {
+        push_unique(&mut configured, model.clone());
+    }
+    configured
+}
+
 fn installed_model_ids(inventory: &[InstalledModel]) -> Vec<String> {
     let mut ids = Vec::new();
     for model in inventory {
@@ -427,15 +437,17 @@ pub async fn installed_models() -> Vec<String> {
     probe_installed_models().await.unwrap_or_default()
 }
 
-/// Merge configured model names with modality capability markers. The relay's
-/// scheduler keys on `asr` and `embed`; concrete model names are still reported.
+/// Merge configured model names with modality capability markers. Installed
+/// TTS models remain discoverable when saved preferences predate Relay Talk.
 pub async fn capability_models(configured: &[String]) -> Vec<String> {
     let configured_models = configured_capability_models(configured);
+    let installed_models = installed_capability_models().await;
     let base = if configured_models.is_empty() {
-        installed_capability_models().await
+        installed_models.clone()
     } else {
         configured_models
     };
+    let base = include_installed_tts_models(base, &installed_models);
     capability_models_from(base).await
 }
 
@@ -1702,6 +1714,20 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
                 "speech-tts-qwen3-nano",
                 "image-zimage-max"
             ]
+        );
+    }
+
+    #[test]
+    fn configured_models_include_installed_tts_for_relay_talk() {
+        let configured = vec!["image-klein-nano".to_string()];
+        let installed = vec![
+            "image-zimage-nano".to_string(),
+            "speech-tts-qwen3-nano".to_string(),
+        ];
+
+        assert_eq!(
+            include_installed_tts_models(configured, &installed),
+            vec!["image-klein-nano", "speech-tts-qwen3-nano"]
         );
     }
 

@@ -1,7 +1,7 @@
 {
   "name": "mere-run-node",
   "private": true,
-  "version": "0.2.12",
+  "version": "0.2.13",
   "description": "Desktop compute node for the mere.run relay.",
   "license": "MIT",
   "repository": {

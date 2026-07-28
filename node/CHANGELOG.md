@@ -1,5 +1,10 @@
 # mere.run Node changelog
 
+## 0.2.13 - 2026-07-28
+
+- Advertise Relay Talk whenever a compatible speech synthesis model is
+  installed, including on Nodes whose saved preferred-model list predates TTS.
+
 ## 0.2.12 - 2026-07-28
 
 - Handle Relay `talk_request` jobs through the installed
