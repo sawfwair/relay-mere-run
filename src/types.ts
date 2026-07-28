@@ -326,6 +326,11 @@ export interface JobRequest {
   fps?: number;
   num_frames?: number;
   lyrics?: string;
+  // Source audio for native audio-to-video lanes (LTX 2.3 A2Vid). The agent
+  // downloads the URL and passes it to the runtime with the segment start.
+  input_audio_url?: string;
+  audio_start_seconds?: number;
+  audio_end_seconds?: number;
 }
 
 // Job tracked by relay
@@ -944,6 +949,9 @@ export interface SubmitJobRequest {
   fps?: number;
   num_frames?: number;
   lyrics?: string;
+  input_audio_url?: string;
+  audio_start_seconds?: number;
+  audio_end_seconds?: number;
 }
 
 export type SubmitVideoRequest = SubmitJobRequest;
