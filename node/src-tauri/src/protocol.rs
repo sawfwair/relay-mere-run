@@ -444,6 +444,20 @@ pub enum AgentMessage {
         owner_user_id: Option<String>,
         error: String,
     },
+    OcrResponse {
+        ocr_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        owner_user_id: Option<String>,
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tokens_generated: Option<u32>,
+    },
+    OcrError {
+        ocr_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        owner_user_id: Option<String>,
+        error: String,
+    },
     AsrStreamEvent {
         session_id: String,
         event: Value,
@@ -593,6 +607,34 @@ pub enum TalkServerMessage {
     },
     TalkCancel {
         talk_id: String,
+    },
+    #[serde(other)]
+    Other,
+}
+
+/// OCR request parameters (relay `OcrRequest`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct OcrRequest {
+    pub image_url: String,
+    #[serde(default)]
+    pub max_tokens: u32,
+    #[serde(default)]
+    pub temperature: f32,
+}
+
+/// OCR-specific relay messages stay outside the legacy generation dispatcher.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OcrServerMessage {
+    OcrRequest {
+        ocr_id: String,
+        #[serde(default)]
+        client_id: String,
+        owner_user_id: String,
+        request: OcrRequest,
+    },
+    OcrCancel {
+        ocr_id: String,
     },
     #[serde(other)]
     Other,
@@ -774,7 +816,6 @@ pub enum ServerMessage {
         plan_id: String,
     },
     InventoryRequest,
-    /// Catch-all for modalities this node does not yet handle (OCR).
     #[serde(other)]
     Other,
 }
@@ -899,6 +940,59 @@ mod inventory_tests {
         assert_eq!(value["sample_rate"], 24_000);
         assert_eq!(value["output_format"], "wav");
         assert!(value.get("audio_data").is_none());
+    }
+
+    #[test]
+    fn decodes_ocr_request_and_cancel() {
+        let message: OcrServerMessage = serde_json::from_str(
+            r#"{
+              "type": "ocr_request",
+              "ocr_id": "ocr_123",
+              "client_id": "client_123",
+              "owner_user_id": "user_123",
+              "request": {
+                "image_url": "https://assets.example/page.png",
+                "max_tokens": 2048,
+                "temperature": 0.1
+              }
+            }"#,
+        )
+        .expect("OCR request should decode");
+        match message {
+            OcrServerMessage::OcrRequest {
+                ocr_id, request, ..
+            } => {
+                assert_eq!(ocr_id, "ocr_123");
+                assert_eq!(request.image_url, "https://assets.example/page.png");
+                assert_eq!(request.max_tokens, 2048);
+                assert_eq!(request.temperature, 0.1);
+            }
+            _ => panic!("expected OCR request"),
+        }
+
+        let cancel: OcrServerMessage =
+            serde_json::from_str(r#"{"type":"ocr_cancel","ocr_id":"ocr_123"}"#)
+                .expect("OCR cancel should decode");
+        assert!(matches!(
+            cancel,
+            OcrServerMessage::OcrCancel { ocr_id } if ocr_id == "ocr_123"
+        ));
+    }
+
+    #[test]
+    fn encodes_ocr_response_contract() {
+        let message = AgentMessage::OcrResponse {
+            ocr_id: "ocr_123".to_string(),
+            owner_user_id: Some("user_123".to_string()),
+            text: "Invoice total: $42.00".to_string(),
+            tokens_generated: Some(8),
+        };
+        let value = serde_json::to_value(message).expect("OCR response JSON");
+        assert_eq!(value["type"], "ocr_response");
+        assert_eq!(value["ocr_id"], "ocr_123");
+        assert_eq!(value["owner_user_id"], "user_123");
+        assert_eq!(value["text"], "Invoice total: $42.00");
+        assert_eq!(value["tokens_generated"], 8);
     }
 }
 

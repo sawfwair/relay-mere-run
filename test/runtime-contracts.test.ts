@@ -55,6 +55,35 @@ describe('runtime JSON contracts', () => {
     })).toThrow();
   });
 
+  it('accepts typed Node OCR and structured batch-ASR responses', () => {
+    expect(agentMessageSchema.parse({
+      type: 'ocr_response',
+      ocr_id: 'ocr-1',
+      owner_user_id: 'user-1',
+      text: '# Scanned heading',
+      tokens_generated: 0,
+    })).toMatchObject({ type: 'ocr_response', text: '# Scanned heading' });
+
+    expect(agentMessageSchema.parse({
+      type: 'asr_response',
+      asr_id: 'asr-1',
+      owner_user_id: 'user-1',
+      text: 'Clean transcript.',
+      language: 'en',
+      duration_seconds: 2.64,
+      sentence_alignments: [{
+        text: 'Clean transcript.',
+        start_seconds: 0,
+        duration_seconds: 2.64,
+        end_seconds: 2.64,
+        tokens: [],
+      }],
+    })).toMatchObject({
+      type: 'asr_response',
+      sentence_alignments: [{ text: 'Clean transcript.' }],
+    });
+  });
+
   it('rejects malformed JSON text and ignores unrelated application errors', () => {
     expect(() => parseJson('{', submitJobRequestSchema)).toThrow(InvalidJsonError);
     expect(invalidJsonResponse(new Error('unrelated'))).toBeNull();
