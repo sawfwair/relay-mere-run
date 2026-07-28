@@ -14,9 +14,9 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
 
 use crate::protocol::{
-    AsrBackend, AsrOutput, AsrRequest, AsrStreamingCapabilities, ChatMessage, ChatRequest,
-    EmbedDataRow, EmbedOutput, EmbedRequest, JobKind, JobRequest, ModelInventoryStatus,
-    RuntimeDiagnostic, TalkRequest,
+    AsrBackend, AsrOutput, AsrRequest, AsrSentenceAlignment, AsrStreamingCapabilities, ChatMessage,
+    ChatRequest, EmbedDataRow, EmbedOutput, EmbedRequest, JobKind, JobRequest,
+    ModelInventoryStatus, OcrRequest, RuntimeDiagnostic, TalkRequest,
 };
 
 const DEFAULT_MODEL: &str = "image-klein-9b";
@@ -29,11 +29,28 @@ const VIDEO_CAPABILITY: &str = "video";
 const ASR_CAPABILITY: &str = "asr";
 const EMBED_CAPABILITY: &str = "embed";
 const TALK_CAPABILITY: &str = "talk-nano";
-const ADVERTISABLE_MODEL_CATEGORIES: &[&str] =
-    &["image", "text-chat", "music", "video", "speech-tts"];
-const ADVERTISABLE_MODEL_PREFIXES: &[&str] =
-    &["image-", "text-chat-", "music-", "video-", "speech-tts-"];
+const OCR_CAPABILITY: &str = "ocr";
+const LIGHTON_OCR_MODEL: &str = "vision-ocr-lighton";
+const INFINITY_OCR_FLASH_MODEL: &str = "vision-ocr-infinity-flash";
+const INFINITY_OCR_PRO_MODEL: &str = "vision-ocr-infinity-pro-int8";
+const ADVERTISABLE_MODEL_CATEGORIES: &[&str] = &[
+    "image",
+    "text-chat",
+    "music",
+    "video",
+    "speech-tts",
+    "vision-ocr",
+];
+const ADVERTISABLE_MODEL_PREFIXES: &[&str] = &[
+    "image-",
+    "text-chat-",
+    "music-",
+    "video-",
+    "speech-tts-",
+    "vision-ocr-",
+];
 const MAX_ASR_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_OCR_DOWNLOAD_BYTES: u64 = 10 * 1024 * 1024;
 
 fn push_unique(models: &mut Vec<String>, model: impl Into<String>) {
     let model = model.into();
@@ -107,6 +124,33 @@ pub(crate) async fn resolve_mere_run_binary() -> PathBuf {
 pub(crate) async fn mere_run_output(args: &[&str]) -> std::io::Result<Output> {
     let binary = resolve_mere_run_binary().await;
     Command::new(binary).args(args).output().await
+}
+
+async fn cancellable_command_output(
+    binary: &Path,
+    args: &[String],
+    mut cancel: watch::Receiver<bool>,
+    cancellation_message: &str,
+) -> Result<Output> {
+    let mut command = Command::new(binary);
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let child = command.spawn()?;
+    let output = child.wait_with_output();
+    tokio::pin!(output);
+    loop {
+        tokio::select! {
+            result = &mut output => return Ok(result?),
+            changed = cancel.changed() => {
+                if changed.is_err() || *cancel.borrow() {
+                    return Err(anyhow!(cancellation_message.to_string()));
+                }
+            }
+        }
+    }
 }
 
 pub struct RuntimeInventory {
@@ -194,10 +238,13 @@ fn configured_capability_models(configured: &[String]) -> Vec<String> {
     models
 }
 
-fn include_installed_tts_models(mut configured: Vec<String>, installed: &[String]) -> Vec<String> {
+fn include_required_runtime_models(
+    mut configured: Vec<String>,
+    installed: &[String],
+) -> Vec<String> {
     for model in installed
         .iter()
-        .filter(|model| model.starts_with("speech-tts-"))
+        .filter(|model| model.starts_with("speech-tts-") || model.starts_with("vision-ocr-"))
     {
         push_unique(&mut configured, model.clone());
     }
@@ -437,8 +484,8 @@ pub async fn installed_models() -> Vec<String> {
     probe_installed_models().await.unwrap_or_default()
 }
 
-/// Merge configured model names with modality capability markers. Installed
-/// TTS models remain discoverable when saved preferences predate Relay Talk.
+/// Merge configured model names with modality capability markers. Runtime
+/// service models remain discoverable when saved preferences predate a feature.
 pub async fn capability_models(configured: &[String]) -> Vec<String> {
     let configured_models = configured_capability_models(configured);
     let installed_models = installed_capability_models().await;
@@ -447,12 +494,13 @@ pub async fn capability_models(configured: &[String]) -> Vec<String> {
     } else {
         configured_models
     };
-    let base = include_installed_tts_models(base, &installed_models);
+    let base = include_required_runtime_models(base, &installed_models);
     capability_models_from(base).await
 }
 
 async fn capability_models_from(base: Vec<String>) -> Vec<String> {
     let has_tts_model = base.iter().any(|model| model.starts_with("speech-tts-"));
+    let has_ocr_model = base.iter().any(|model| model.starts_with("vision-ocr-"));
     let mut models = Vec::new();
     for model in base {
         push_unique(&mut models, model);
@@ -480,6 +528,10 @@ async fn capability_models_from(base: Vec<String>) -> Vec<String> {
 
     if has_tts_model && command_supports(&["speech", "synthesize", "--help"]).await {
         push_unique(&mut models, TALK_CAPABILITY);
+    }
+
+    if has_ocr_model && command_supports(&["vision", "ocr", "--help"]).await {
+        push_unique(&mut models, OCR_CAPABILITY);
     }
 
     if command_supports(&["text", "embed", "--help"]).await {
@@ -1056,6 +1108,18 @@ pub async fn transcribe_speech(
     req: &AsrRequest,
     out_dir: &Path,
     asr_id: &str,
+    cancel: watch::Receiver<bool>,
+) -> Result<AsrOutput> {
+    let binary = resolve_mere_run_binary().await;
+    transcribe_speech_with_binary(req, out_dir, asr_id, cancel, &binary).await
+}
+
+async fn transcribe_speech_with_binary(
+    req: &AsrRequest,
+    out_dir: &Path,
+    asr_id: &str,
+    mut cancel: watch::Receiver<bool>,
+    binary: &Path,
 ) -> Result<AsrOutput> {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1064,10 +1128,23 @@ pub async fn transcribe_speech(
     let job_dir = out_dir.join(format!("{asr_id}-{unique:x}"));
     tokio::fs::create_dir_all(&job_dir).await?;
     let result = async {
-        let audio_path = download_asr_input(&req.audio_url, &job_dir).await?;
+        let audio_path = tokio::select! {
+            result = download_asr_input(&req.audio_url, &job_dir) => result?,
+            changed = cancel.changed() => {
+                if changed.is_err() || *cancel.borrow() {
+                    return Err(anyhow!("speech transcription cancelled"));
+                }
+                return Err(anyhow!("speech transcription cancellation channel changed unexpectedly"));
+            }
+        };
         let args = build_transcribe_args(&audio_path, req);
-        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-        let output = mere_run_output(&arg_refs).await?;
+        let output = cancellable_command_output(
+            binary,
+            &args,
+            cancel,
+            "speech transcription cancelled",
+        )
+        .await?;
         if !output.status.success() {
             return Err(anyhow!(
                 "downloaded_payload_invalid_audio: verified audio container could not be decoded"
@@ -1079,6 +1156,80 @@ pub async fn transcribe_speech(
     }
     .await;
     let keep_failed = std::env::var("MERERUN_NODE_KEEP_FAILED_ASR")
+        .ok()
+        .is_some_and(|value| value == "1");
+    if result.is_ok() || !keep_failed {
+        let _ = tokio::fs::remove_dir_all(&job_dir).await;
+    }
+    result
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OcrOutput {
+    pub text: String,
+    pub tokens_generated: Option<u32>,
+}
+
+/// Download one verified image and extract its text with an installed OCR model.
+pub async fn extract_ocr_text(
+    req: &OcrRequest,
+    out_dir: &Path,
+    ocr_id: &str,
+    cancel: watch::Receiver<bool>,
+) -> Result<OcrOutput> {
+    let binary = resolve_mere_run_binary().await;
+    let installed = installed_capability_models().await;
+    let model = select_ocr_model(&installed).ok_or_else(|| {
+        anyhow!(
+            "OCR requires an installed supported model: {LIGHTON_OCR_MODEL}, \
+             {INFINITY_OCR_FLASH_MODEL}, or {INFINITY_OCR_PRO_MODEL}"
+        )
+    })?;
+    extract_ocr_text_with_binary(req, out_dir, ocr_id, cancel, &binary, &model).await
+}
+
+async fn extract_ocr_text_with_binary(
+    req: &OcrRequest,
+    out_dir: &Path,
+    ocr_id: &str,
+    mut cancel: watch::Receiver<bool>,
+    binary: &Path,
+    model: &OcrRuntimeModel,
+) -> Result<OcrOutput> {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    let job_dir = out_dir.join(format!("{ocr_id}-{unique:x}"));
+    tokio::fs::create_dir_all(&job_dir).await?;
+    let result = async {
+        let image_path = tokio::select! {
+            result = download_ocr_input(&req.image_url, &job_dir) => result?,
+            changed = cancel.changed() => {
+                if changed.is_err() || *cancel.borrow() {
+                    return Err(anyhow!("OCR extraction cancelled"));
+                }
+                return Err(anyhow!("OCR cancellation channel changed unexpectedly"));
+            }
+        };
+        let args = build_ocr_args(&image_path, req, model);
+        let output =
+            cancellable_command_output(binary, &args, cancel, "OCR extraction cancelled").await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("mere.run vision ocr failed: {}", stderr.trim()));
+        }
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if text.is_empty() {
+            return Err(anyhow!("mere.run vision ocr returned no text"));
+        }
+        Ok(OcrOutput {
+            text,
+            tokens_generated: None,
+        })
+    }
+    .await;
+    let keep_failed = std::env::var("MERERUN_NODE_KEEP_FAILED_OCR")
         .ok()
         .is_some_and(|value| value == "1");
     if result.is_ok() || !keep_failed {
@@ -1213,6 +1364,7 @@ fn build_transcribe_args(audio_path: &Path, req: &AsrRequest) -> Vec<String> {
         "--task".to_string(),
         req.task.clone(),
         "--quiet".to_string(),
+        "--timestamps".to_string(),
     ];
     if let Some(language) = req.language.as_deref() {
         if !language.trim().is_empty() {
@@ -1224,6 +1376,71 @@ fn build_transcribe_args(audio_path: &Path, req: &AsrRequest) -> Vec<String> {
         args.push("--max-tokens".to_string());
         args.push(req.max_tokens.to_string());
     }
+    args
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OcrRuntimeModel {
+    LightOn(String),
+    Infinity(String),
+}
+
+fn select_ocr_model(installed: &[String]) -> Option<OcrRuntimeModel> {
+    if installed.iter().any(|model| model == LIGHTON_OCR_MODEL) {
+        return Some(OcrRuntimeModel::LightOn(LIGHTON_OCR_MODEL.to_string()));
+    }
+    if installed
+        .iter()
+        .any(|model| model == INFINITY_OCR_FLASH_MODEL)
+    {
+        return Some(OcrRuntimeModel::Infinity(
+            INFINITY_OCR_FLASH_MODEL.to_string(),
+        ));
+    }
+    if installed
+        .iter()
+        .any(|model| model == INFINITY_OCR_PRO_MODEL)
+    {
+        return Some(OcrRuntimeModel::Infinity(
+            INFINITY_OCR_PRO_MODEL.to_string(),
+        ));
+    }
+    None
+}
+
+fn build_ocr_args(image_path: &Path, req: &OcrRequest, model: &OcrRuntimeModel) -> Vec<String> {
+    let mut args = vec![
+        "vision".to_string(),
+        "ocr".to_string(),
+        image_path.to_string_lossy().to_string(),
+    ];
+    match model {
+        OcrRuntimeModel::LightOn(model) => {
+            args.extend([
+                "--backend".to_string(),
+                "lighton".to_string(),
+                "--model".to_string(),
+                model.clone(),
+            ]);
+        }
+        OcrRuntimeModel::Infinity(model) => {
+            args.extend([
+                "--backend".to_string(),
+                "infinity".to_string(),
+                "--infinity-model".to_string(),
+                model.clone(),
+                "--infinity-task".to_string(),
+                "doc2md".to_string(),
+            ]);
+        }
+    }
+    args.extend([
+        "--max-tokens".to_string(),
+        req.max_tokens.max(1).to_string(),
+        "--temperature".to_string(),
+        req.temperature.to_string(),
+        "--quiet".to_string(),
+    ]);
     args
 }
 
@@ -1270,13 +1487,86 @@ fn parse_transcript_output(stdout: &str, req: &AsrRequest) -> Result<AsrOutput> 
         }
     }
 
+    if let Some(sentences) = parse_timestamped_transcript(stdout) {
+        let duration_seconds = sentences.last().map(|sentence| sentence.end_seconds);
+        let text = sentences
+            .iter()
+            .map(|sentence| sentence.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Ok(AsrOutput {
+            text,
+            language: req.language.clone(),
+            duration_seconds,
+            token_alignments: None,
+            sentence_alignments: Some(sentences),
+        });
+    }
+
     Ok(AsrOutput {
-        text: stdout.to_string(),
+        text: stdout.trim().to_string(),
         language: req.language.clone(),
         duration_seconds: None,
         token_alignments: None,
         sentence_alignments: None,
     })
+}
+
+fn parse_timestamped_transcript(stdout: &str) -> Option<Vec<AsrSentenceAlignment>> {
+    let mut sentences = Vec::new();
+    for line in stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let Some((timestamps, text)) = line
+            .strip_prefix('[')
+            .and_then(|line| line.split_once("] "))
+        else {
+            continue;
+        };
+        let Some((start, end)) = timestamps.split_once(" --> ") else {
+            continue;
+        };
+        let (Some(start_seconds), Some(end_seconds)) =
+            (parse_transcript_time(start), parse_transcript_time(end))
+        else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() || end_seconds < start_seconds {
+            continue;
+        }
+        sentences.push(AsrSentenceAlignment {
+            text: text.to_string(),
+            start_seconds,
+            duration_seconds: end_seconds - start_seconds,
+            end_seconds,
+            tokens: Vec::new(),
+        });
+    }
+    (!sentences.is_empty()).then_some(sentences)
+}
+
+fn parse_transcript_time(value: &str) -> Option<f64> {
+    let parts = value.split(':').collect::<Vec<_>>();
+    let (hours, minutes, seconds) = match parts.as_slice() {
+        [minutes, seconds] => (
+            0.0,
+            minutes.parse::<f64>().ok()?,
+            seconds.parse::<f64>().ok()?,
+        ),
+        [hours, minutes, seconds] => (
+            hours.parse::<f64>().ok()?,
+            minutes.parse::<f64>().ok()?,
+            seconds.parse::<f64>().ok()?,
+        ),
+        _ => return None,
+    };
+    if minutes >= 60.0 || seconds >= 60.0 {
+        return None;
+    }
+    Some(hours * 3600.0 + minutes * 60.0 + seconds)
 }
 
 fn parse_embed_output(stdout: &str, fallback_model: &str) -> Result<EmbedOutput> {
@@ -1519,6 +1809,105 @@ async fn download_asr_input(url: &str, job_dir: &Path) -> Result<PathBuf> {
     Ok(audio_path)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OcrImageContainer {
+    Png,
+    Jpeg,
+    Webp,
+    Gif,
+}
+
+impl OcrImageContainer {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::Webp => "webp",
+            Self::Gif => "gif",
+        }
+    }
+}
+
+fn sniff_ocr_image_container(prefix: &[u8]) -> Result<OcrImageContainer> {
+    let trimmed = prefix
+        .iter()
+        .copied()
+        .skip_while(u8::is_ascii_whitespace)
+        .collect::<Vec<_>>();
+    if trimmed.starts_with(b"<") || trimmed.starts_with(b"{") || trimmed.starts_with(b"[") {
+        return Err(anyhow!(
+            "unsupported_image_container: downloaded payload was text data"
+        ));
+    }
+    if prefix.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Ok(OcrImageContainer::Png);
+    }
+    if prefix.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Ok(OcrImageContainer::Jpeg);
+    }
+    if prefix.len() >= 12 && &prefix[0..4] == b"RIFF" && &prefix[8..12] == b"WEBP" {
+        return Ok(OcrImageContainer::Webp);
+    }
+    if prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a") {
+        return Ok(OcrImageContainer::Gif);
+    }
+    Err(anyhow!(
+        "unsupported_image_container: downloaded payload has an unknown container"
+    ))
+}
+
+async fn download_ocr_input(url: &str, job_dir: &Path) -> Result<PathBuf> {
+    let response = reqwest::Client::new()
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| anyhow!("OCR image download request failed"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(anyhow!(
+            "OCR image download failed with HTTP status {status}"
+        ));
+    }
+    let declared_length = response.content_length();
+    if declared_length.is_some_and(|length| length > MAX_OCR_DOWNLOAD_BYTES) {
+        return Err(anyhow!("OCR image download exceeded the 10 MiB limit"));
+    }
+
+    let pending_path = job_dir.join("input.download");
+    let mut file = tokio::fs::File::create(&pending_path).await?;
+    let mut stream = response.bytes_stream();
+    let mut actual_bytes = 0_u64;
+    let mut prefix = Vec::with_capacity(16);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| anyhow!("OCR image download body was truncated"))?;
+        actual_bytes = actual_bytes.saturating_add(chunk.len() as u64);
+        if actual_bytes > MAX_OCR_DOWNLOAD_BYTES {
+            return Err(anyhow!("OCR image download exceeded the 10 MiB limit"));
+        }
+        if prefix.len() < 16 {
+            let take = (16 - prefix.len()).min(chunk.len());
+            prefix.extend_from_slice(&chunk[..take]);
+        }
+        file.write_all(&chunk).await?;
+    }
+    file.flush().await?;
+    drop(file);
+    if actual_bytes == 0 {
+        return Err(anyhow!(
+            "unsupported_image_container: downloaded payload was empty"
+        ));
+    }
+    if declared_length.is_some_and(|length| length != actual_bytes) {
+        return Err(anyhow!(
+            "unsupported_image_container: downloaded payload was truncated"
+        ));
+    }
+    let container = sniff_ocr_image_container(&prefix)?;
+    let image_path = job_dir.join(format!("input.{}", container.extension()));
+    tokio::fs::rename(pending_path, &image_path).await?;
+    Ok(image_path)
+}
+
 async fn download_to(url: &str, path: &Path) -> Result<()> {
     let resp = reqwest::get(url).await?;
     if !resp.status().is_success() {
@@ -1545,6 +1934,7 @@ mod tests {
                 { "id": "speech-tts-qwen3-nano", "category": "speech-tts", "size": "4.57 GB" },
                 { "id": "speech-asr-qwen3", "category": "speech-asr", "size": "2.47 GB" },
                 { "id": "text-embed-qwen3-0.6b", "category": "text-embed", "size": "1.21 GB" },
+                { "id": "vision-ocr-lighton", "category": "vision-ocr", "size": "4.1 GB" },
                 { "id": "sfx-woosh-flow", "category": "sfx", "size": "5 GB" }
               ]
             }"#,
@@ -1557,7 +1947,8 @@ mod tests {
                 "text-chat-gemma4",
                 "music-acestep",
                 "video-ltx23-av-mlx",
-                "speech-tts-qwen3-nano"
+                "speech-tts-qwen3-nano",
+                "vision-ocr-lighton"
             ]
         );
     }
@@ -1654,6 +2045,29 @@ mod tests {
     }
 
     #[test]
+    fn sniffs_supported_ocr_images_and_rejects_text_and_unknown_payloads() {
+        assert_eq!(
+            sniff_ocr_image_container(b"\x89PNG\r\n\x1a\n00000000").unwrap(),
+            OcrImageContainer::Png
+        );
+        assert_eq!(
+            sniff_ocr_image_container(&[0xff, 0xd8, 0xff, 0xe0]).unwrap(),
+            OcrImageContainer::Jpeg
+        );
+        assert_eq!(
+            sniff_ocr_image_container(b"RIFF0000WEBP0000").unwrap(),
+            OcrImageContainer::Webp
+        );
+        assert_eq!(
+            sniff_ocr_image_container(b"GIF89a0000000000").unwrap(),
+            OcrImageContainer::Gif
+        );
+        assert!(sniff_ocr_image_container(b"<svg></svg>").is_err());
+        assert!(sniff_ocr_image_container(br#"{"error":true}"#).is_err());
+        assert!(sniff_ocr_image_container(b"not-an-image").is_err());
+    }
+
+    #[test]
     fn recognizes_an_empty_model_list_table() {
         let parsed = model_list_inventory(
             "ID                  Category       Status     Size\n\
@@ -1675,6 +2089,7 @@ video-ltx23-av-mlx               video           installed  48 GB
 speech-tts-qwen3-nano            speech-tts      installed  4.57 GB
 speech-asr-qwen3                 speech-asr      installed  2.47 GB
 text-embed-qwen3-0.6b            text-embed      installed  1.21 GB
+vision-ocr-lighton               vision-ocr      installed  4.1 GB
 sfx-woosh-flow                   sfx             installed  5 GB"#,
         );
 
@@ -1685,7 +2100,8 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
                 "text-chat-gemma4",
                 "music-acestep",
                 "video-ltx23-av-mlx",
-                "speech-tts-qwen3-nano"
+                "speech-tts-qwen3-nano",
+                "vision-ocr-lighton"
             ]
         );
     }
@@ -1700,6 +2116,7 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
             "music-acestep".to_string(),
             "video-ltx23-av-mlx".to_string(),
             "speech-tts-qwen3-nano".to_string(),
+            "vision-ocr-lighton".to_string(),
             "sfx-woosh-flow".to_string(),
             "image-zimage-max".to_string(),
         ]);
@@ -1712,22 +2129,28 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
                 "music-acestep",
                 "video-ltx23-av-mlx",
                 "speech-tts-qwen3-nano",
+                "vision-ocr-lighton",
                 "image-zimage-max"
             ]
         );
     }
 
     #[test]
-    fn configured_models_include_installed_tts_for_relay_talk() {
+    fn configured_models_include_installed_service_models() {
         let configured = vec!["image-klein-nano".to_string()];
         let installed = vec![
             "image-zimage-nano".to_string(),
             "speech-tts-qwen3-nano".to_string(),
+            "vision-ocr-lighton".to_string(),
         ];
 
         assert_eq!(
-            include_installed_tts_models(configured, &installed),
-            vec!["image-klein-nano", "speech-tts-qwen3-nano"]
+            include_required_runtime_models(configured, &installed),
+            vec![
+                "image-klein-nano",
+                "speech-tts-qwen3-nano",
+                "vision-ocr-lighton"
+            ]
         );
     }
 
@@ -1852,6 +2275,44 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellable_commands_capture_stdout_and_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = format!(
+            "mere-run-node-captured-output-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).expect("create test directory");
+        let fake_binary = dir.join("mere.run");
+        std::fs::write(
+            &fake_binary,
+            "#!/bin/sh\nprintf 'captured transcript'\nprintf 'diagnostic' >&2\n",
+        )
+        .expect("write fake runtime");
+        let mut permissions = std::fs::metadata(&fake_binary)
+            .expect("fake runtime metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_binary, permissions).expect("make fake runtime executable");
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+        let output =
+            cancellable_command_output(&fake_binary, &[], cancel_rx, "test command cancelled")
+                .await
+                .expect("captured command output");
+
+        assert_eq!(output.stdout, b"captured transcript");
+        assert_eq!(output.stderr, b"diagnostic");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn builds_chat_command_without_running_inference() {
         let req = ChatRequest {
@@ -1915,12 +2376,136 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
                 "--task",
                 "transcribe",
                 "--quiet",
+                "--timestamps",
                 "--language",
                 "en",
                 "--max-tokens",
                 "448"
             ]
         );
+    }
+
+    #[test]
+    fn parses_timestamped_transcript_without_duplicating_plain_text() {
+        let req = AsrRequest {
+            audio_url: "https://example.com/audio.wav".to_string(),
+            language: Some("en".to_string()),
+            task: "transcribe".to_string(),
+            backend: AsrBackend::Parakeet,
+            max_tokens: 448,
+        };
+        let output = parse_transcript_output(
+            "Agents Markdown can now read this document aloud.\n\n\
+             [00:00.000 --> 00:03.040] Agents Markdown can now read this document aloud.",
+            &req,
+        )
+        .expect("timestamped transcript");
+
+        assert_eq!(
+            output.text,
+            "Agents Markdown can now read this document aloud."
+        );
+        assert_eq!(output.duration_seconds, Some(3.04));
+        let sentences = output.sentence_alignments.expect("sentence alignments");
+        assert_eq!(sentences.len(), 1);
+        assert_eq!(sentences[0].start_seconds, 0.0);
+        assert_eq!(sentences[0].end_seconds, 3.04);
+        assert!(sentences[0].tokens.is_empty());
+    }
+
+    #[test]
+    fn parses_multiple_timestamp_formats_and_skips_malformed_lines() {
+        let parsed = parse_timestamped_transcript(
+            "[00:58.500 --> 01:02.250] First sentence.\n\
+             [01:02:03.125 --> 01:02:05.500] Second sentence.\n\
+             [bogus --> 00:01.000] ignored",
+        )
+        .expect("timestamped transcript");
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].start_seconds, 58.5);
+        assert_eq!(parsed[0].end_seconds, 62.25);
+        assert_eq!(parsed[1].start_seconds, 3723.125);
+        assert_eq!(parsed[1].end_seconds, 3725.5);
+    }
+
+    #[test]
+    fn plain_transcript_falls_back_without_alignments() {
+        let req = AsrRequest {
+            audio_url: "https://example.com/audio.wav".to_string(),
+            language: None,
+            task: "transcribe".to_string(),
+            backend: AsrBackend::Auto,
+            max_tokens: 0,
+        };
+        let output =
+            parse_transcript_output("A plain transcript.", &req).expect("plain transcript");
+        assert_eq!(output.text, "A plain transcript.");
+        assert!(output.duration_seconds.is_none());
+        assert!(output.sentence_alignments.is_none());
+    }
+
+    #[test]
+    fn selects_and_builds_supported_ocr_commands() {
+        let installed = vec![
+            INFINITY_OCR_FLASH_MODEL.to_string(),
+            LIGHTON_OCR_MODEL.to_string(),
+        ];
+        assert_eq!(
+            select_ocr_model(&installed),
+            Some(OcrRuntimeModel::LightOn(LIGHTON_OCR_MODEL.to_string()))
+        );
+
+        let request = OcrRequest {
+            image_url: "https://example.com/page.png".to_string(),
+            max_tokens: 2048,
+            temperature: 0.1,
+        };
+        assert_eq!(
+            build_ocr_args(
+                Path::new("/tmp/page.png"),
+                &request,
+                &OcrRuntimeModel::LightOn(LIGHTON_OCR_MODEL.to_string())
+            ),
+            vec![
+                "vision",
+                "ocr",
+                "/tmp/page.png",
+                "--backend",
+                "lighton",
+                "--model",
+                LIGHTON_OCR_MODEL,
+                "--max-tokens",
+                "2048",
+                "--temperature",
+                "0.1",
+                "--quiet"
+            ]
+        );
+        assert_eq!(
+            build_ocr_args(
+                Path::new("/tmp/page.png"),
+                &request,
+                &OcrRuntimeModel::Infinity(INFINITY_OCR_FLASH_MODEL.to_string())
+            ),
+            vec![
+                "vision",
+                "ocr",
+                "/tmp/page.png",
+                "--backend",
+                "infinity",
+                "--infinity-model",
+                INFINITY_OCR_FLASH_MODEL,
+                "--infinity-task",
+                "doc2md",
+                "--max-tokens",
+                "2048",
+                "--temperature",
+                "0.1",
+                "--quiet"
+            ]
+        );
+        assert!(select_ocr_model(&["vision-ocr-future".to_string()]).is_none());
     }
 
     #[test]

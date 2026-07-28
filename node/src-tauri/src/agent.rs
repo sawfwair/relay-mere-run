@@ -28,14 +28,16 @@ use crate::plugins;
 use crate::protocol::{
     AgentAvailability, AgentCapabilities, AgentCapacity, AgentMessage, AgentRuntimeInfo,
     AgentSystemInfo, AsrRequest, AsrStreamingCapabilities, ChatRequest, GraphWorkerCapabilities,
-    JobKind, JobRequest, ModelInventoryStatus, PluginCapability, RuntimeDiagnostic, ServerMessage,
-    TalkRequest, TalkServerMessage, ToolRequest,
+    JobKind, JobRequest, ModelInventoryStatus, OcrRequest, OcrServerMessage, PluginCapability,
+    RuntimeDiagnostic, ServerMessage, TalkRequest, TalkServerMessage, ToolRequest,
 };
 use crate::work_gate::DeviceWorkGate;
 
 type ActiveGraphJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type ActiveModelPlans = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type ActiveTalkJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
+type ActiveAsrJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
+type ActiveOcrJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type ActiveToolJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 
 async fn send_graph_completion(
@@ -559,6 +561,8 @@ async fn connect_and_serve<R: Runtime>(
     let active_graphs = ActiveGraphJobs::default();
     let active_model_plans = ActiveModelPlans::default();
     let active_talks = ActiveTalkJobs::default();
+    let active_asrs = ActiveAsrJobs::default();
+    let active_ocrs = ActiveOcrJobs::default();
     let active_tools = ActiveToolJobs::default();
     let live_asr = LiveAsrSessions::new(work_gate.clone(), out_tx.clone());
     let mut request_tasks = JoinSet::new();
@@ -615,6 +619,7 @@ async fn connect_and_serve<R: Runtime>(
                                     out_tx: &out_tx,
                                     active_graphs: &active_graphs,
                                     active_model_plans: &active_model_plans,
+                                    active_asrs: &active_asrs,
                                     active_tools: &active_tools,
                                     configured_models: &config.models,
                                     work_gate,
@@ -628,32 +633,22 @@ async fn connect_and_serve<R: Runtime>(
                             }
                             continue;
                         }
-                        if is_talk_message(&txt) {
-                            let task_app = app.clone();
-                            let task_out = out_tx.clone();
-                            let task_talks = active_talks.clone();
-                            let task_work_gate = work_gate.clone();
-                            request_tasks.spawn(async move {
-                                if let Err(e) = handle_talk_server_message(
-                                    TalkExecutionContext {
-                                        app: &task_app,
-                                        out_tx: &task_out,
-                                        active_talks: &task_talks,
-                                        work_gate: &task_work_gate,
-                                    },
-                                    &txt,
-                                ).await {
-                                    emit(&task_app, "node:log", serde_json::json!({
-                                        "level": "error", "message": format!("{e}")
-                                    }));
-                                }
-                            });
+                        if spawn_special_media_message(
+                            &mut request_tasks,
+                            app,
+                            &out_tx,
+                            &active_talks,
+                            &active_ocrs,
+                            work_gate,
+                            txt.to_string(),
+                        ) {
                             continue;
                         }
                         let task_app = app.clone();
                         let task_out = out_tx.clone();
                         let task_graphs = active_graphs.clone();
                         let task_plans = active_model_plans.clone();
+                        let task_asrs = active_asrs.clone();
                         let task_tools = active_tools.clone();
                         let task_models = config.models.clone();
                         let task_work_gate = work_gate.clone();
@@ -665,6 +660,7 @@ async fn connect_and_serve<R: Runtime>(
                                     out_tx: &task_out,
                                     active_graphs: &task_graphs,
                                     active_model_plans: &task_plans,
+                                    active_asrs: &task_asrs,
                                     active_tools: &task_tools,
                                     configured_models: &task_models,
                                     work_gate: &task_work_gate,
@@ -693,6 +689,12 @@ async fn connect_and_serve<R: Runtime>(
         let _ = cancel.send(true);
     }
     for cancel in active_talks.lock().await.values() {
+        let _ = cancel.send(true);
+    }
+    for cancel in active_asrs.lock().await.values() {
+        let _ = cancel.send(true);
+    }
+    for cancel in active_ocrs.lock().await.values() {
         let _ = cancel.send(true);
     }
     for cancel in active_tools.lock().await.values() {
@@ -734,6 +736,77 @@ fn is_talk_message(text: &str) -> bool {
         .is_some_and(|message_type| matches!(message_type.as_str(), "talk_request" | "talk_cancel"))
 }
 
+fn is_ocr_message(text: &str) -> bool {
+    message_type(text)
+        .is_some_and(|message_type| matches!(message_type.as_str(), "ocr_request" | "ocr_cancel"))
+}
+
+fn spawn_special_media_message<R: Runtime>(
+    request_tasks: &mut JoinSet<()>,
+    app: &AppHandle<R>,
+    out_tx: &mpsc::UnboundedSender<Message>,
+    active_talks: &ActiveTalkJobs,
+    active_ocrs: &ActiveOcrJobs,
+    work_gate: &DeviceWorkGate,
+    text: String,
+) -> bool {
+    if is_talk_message(&text) {
+        let task_app = app.clone();
+        let task_out = out_tx.clone();
+        let task_talks = active_talks.clone();
+        let task_work_gate = work_gate.clone();
+        request_tasks.spawn(async move {
+            if let Err(error) = handle_talk_server_message(
+                TalkExecutionContext {
+                    app: &task_app,
+                    out_tx: &task_out,
+                    active_talks: &task_talks,
+                    work_gate: &task_work_gate,
+                },
+                &text,
+            )
+            .await
+            {
+                emit_request_error(&task_app, error);
+            }
+        });
+        return true;
+    }
+    if is_ocr_message(&text) {
+        let task_app = app.clone();
+        let task_out = out_tx.clone();
+        let task_ocrs = active_ocrs.clone();
+        let task_work_gate = work_gate.clone();
+        request_tasks.spawn(async move {
+            if let Err(error) = handle_ocr_server_message(
+                OcrExecutionContext {
+                    app: &task_app,
+                    out_tx: &task_out,
+                    active_ocrs: &task_ocrs,
+                    work_gate: &task_work_gate,
+                },
+                &text,
+            )
+            .await
+            {
+                emit_request_error(&task_app, error);
+            }
+        });
+        return true;
+    }
+    false
+}
+
+fn emit_request_error<R: Runtime>(app: &AppHandle<R>, error: anyhow::Error) {
+    emit(
+        app,
+        "node:log",
+        serde_json::json!({
+            "level": "error", "message": format!("{error}")
+        }),
+    );
+}
+
 fn message_type(text: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(text)
         .ok()
@@ -750,6 +823,7 @@ struct ServerMessageContext<'a, R: Runtime> {
     out_tx: &'a mpsc::UnboundedSender<Message>,
     active_graphs: &'a ActiveGraphJobs,
     active_model_plans: &'a ActiveModelPlans,
+    active_asrs: &'a ActiveAsrJobs,
     active_tools: &'a ActiveToolJobs,
     configured_models: &'a [String],
     work_gate: &'a DeviceWorkGate,
@@ -765,6 +839,7 @@ async fn handle_server_message<R: Runtime>(
         out_tx,
         active_graphs,
         active_model_plans,
+        active_asrs,
         active_tools,
         configured_models,
         work_gate,
@@ -951,42 +1026,19 @@ async fn handle_server_message<R: Runtime>(
             owner_user_id,
             request,
         } => {
-            let _work_permit = work_gate.acquire("relay", &asr_id).await;
-            emit(
-                app,
-                "node:job",
-                serde_json::json!({
-                    "job_id": asr_id, "kind": "asr", "state": "started",
-                    "client_id": client_id, "prompt": request.audio_url, "model": "mere.run speech transcribe",
-                }),
-            );
-
-            let result_msg = match run_asr(&request, &asr_id).await {
-                Ok(output) => AgentMessage::AsrResponse {
-                    asr_id: asr_id.clone(),
-                    owner_user_id: Some(owner_user_id.clone()),
-                    text: output.text,
-                    language: output.language,
-                    duration_seconds: output.duration_seconds,
-                    token_alignments: output.token_alignments,
-                    sentence_alignments: output.sentence_alignments,
+            execute_asr_request(
+                AsrExecutionContext {
+                    app,
+                    out_tx,
+                    active_asrs,
+                    work_gate,
                 },
-                Err(e) => AgentMessage::AsrError {
-                    asr_id: asr_id.clone(),
-                    owner_user_id: Some(owner_user_id.clone()),
-                    error: e.to_string(),
-                },
-            };
-
-            let ok = matches!(&result_msg, AgentMessage::AsrResponse { .. });
-            out_tx.send(Message::Text(serde_json::to_string(&result_msg)?.into()))?;
-            emit(
-                app,
-                "node:job",
-                serde_json::json!({
-                    "job_id": asr_id, "kind": "asr", "state": if ok { "done" } else { "failed" },
-                }),
-            );
+                asr_id,
+                client_id,
+                owner_user_id,
+                request,
+            )
+            .await?;
         }
         ServerMessage::EmbedRequest {
             embed_id,
@@ -1192,13 +1244,7 @@ async fn handle_server_message<R: Runtime>(
             );
         }
         ServerMessage::AsrCancel { asr_id } => {
-            emit(
-                app,
-                "node:log",
-                serde_json::json!({
-                    "level": "info", "message": format!("ASR cancel requested for {asr_id}")
-                }),
-            );
+            cancel_asr_request(app, active_asrs, &asr_id).await;
         }
         ServerMessage::AsrStreamStart {
             session_id,
@@ -1426,9 +1472,110 @@ async fn run_job(
     mererun::generate_job_output(req, &dir, job_id, Some(progress)).await
 }
 
-async fn run_asr(req: &AsrRequest, asr_id: &str) -> Result<crate::protocol::AsrOutput> {
+struct AsrExecutionContext<'a, R: Runtime> {
+    app: &'a AppHandle<R>,
+    out_tx: &'a mpsc::UnboundedSender<Message>,
+    active_asrs: &'a ActiveAsrJobs,
+    work_gate: &'a DeviceWorkGate,
+}
+
+async fn execute_asr_request<R: Runtime>(
+    context: AsrExecutionContext<'_, R>,
+    asr_id: String,
+    client_id: String,
+    owner_user_id: String,
+    request: AsrRequest,
+) -> Result<()> {
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    {
+        let mut active = context.active_asrs.lock().await;
+        if active.contains_key(&asr_id) {
+            return Err(anyhow!("ASR {asr_id} is already running"));
+        }
+        active.insert(asr_id.clone(), cancel_tx);
+    }
+    let _work_permit = context.work_gate.acquire("relay", &asr_id).await;
+    emit(
+        context.app,
+        "node:job",
+        serde_json::json!({
+            "job_id": asr_id, "kind": "asr", "state": "started",
+            "client_id": client_id, "prompt": "remote audio", "model": "mere.run speech transcribe",
+        }),
+    );
+
+    let message = build_asr_result(&asr_id, &owner_user_id, &request, cancel_rx).await;
+    context.active_asrs.lock().await.remove(&asr_id);
+    let state = match &message {
+        AgentMessage::AsrResponse { .. } => "done",
+        AgentMessage::AsrError { error, .. } if error == "speech transcription cancelled" => {
+            "cancelled"
+        }
+        _ => "failed",
+    };
+    context
+        .out_tx
+        .send(Message::Text(serde_json::to_string(&message)?.into()))?;
+    emit(
+        context.app,
+        "node:job",
+        serde_json::json!({
+            "job_id": asr_id,
+            "kind": "asr",
+            "state": state,
+        }),
+    );
+    Ok(())
+}
+
+async fn build_asr_result(
+    asr_id: &str,
+    owner_user_id: &str,
+    request: &AsrRequest,
+    cancel: watch::Receiver<bool>,
+) -> AgentMessage {
+    match run_asr(request, asr_id, cancel).await {
+        Ok(output) => AgentMessage::AsrResponse {
+            asr_id: asr_id.to_string(),
+            owner_user_id: Some(owner_user_id.to_string()),
+            text: output.text,
+            language: output.language,
+            duration_seconds: output.duration_seconds,
+            token_alignments: output.token_alignments,
+            sentence_alignments: output.sentence_alignments,
+        },
+        Err(error) => AgentMessage::AsrError {
+            asr_id: asr_id.to_string(),
+            owner_user_id: Some(owner_user_id.to_string()),
+            error: error.to_string(),
+        },
+    }
+}
+
+async fn cancel_asr_request<R: Runtime>(
+    app: &AppHandle<R>,
+    active_asrs: &ActiveAsrJobs,
+    asr_id: &str,
+) {
+    if let Some(cancel) = active_asrs.lock().await.get(asr_id) {
+        let _ = cancel.send(true);
+    }
+    emit(
+        app,
+        "node:log",
+        serde_json::json!({
+            "level": "info", "message": format!("ASR cancel requested for {asr_id}")
+        }),
+    );
+}
+
+async fn run_asr(
+    req: &AsrRequest,
+    asr_id: &str,
+    cancel: watch::Receiver<bool>,
+) -> Result<crate::protocol::AsrOutput> {
     let dir = std::env::temp_dir().join("mere-run-node").join("asr");
-    mererun::transcribe_speech(req, &dir, asr_id).await
+    mererun::transcribe_speech(req, &dir, asr_id, cancel).await
 }
 
 async fn run_chat(req: &ChatRequest) -> Result<String> {
@@ -1598,6 +1745,111 @@ async fn build_talk_result(
     }
 }
 
+struct OcrExecutionContext<'a, R: Runtime> {
+    app: &'a AppHandle<R>,
+    out_tx: &'a mpsc::UnboundedSender<Message>,
+    active_ocrs: &'a ActiveOcrJobs,
+    work_gate: &'a DeviceWorkGate,
+}
+
+async fn handle_ocr_server_message<R: Runtime>(
+    context: OcrExecutionContext<'_, R>,
+    text: &str,
+) -> Result<()> {
+    match serde_json::from_str::<OcrServerMessage>(text)? {
+        OcrServerMessage::OcrRequest {
+            ocr_id,
+            client_id,
+            owner_user_id,
+            request,
+        } => execute_ocr_request(context, ocr_id, client_id, owner_user_id, request).await,
+        OcrServerMessage::OcrCancel { ocr_id } => {
+            if let Some(cancel) = context.active_ocrs.lock().await.get(&ocr_id) {
+                let _ = cancel.send(true);
+            }
+            emit(
+                context.app,
+                "node:log",
+                serde_json::json!({
+                    "level": "info", "message": format!("OCR cancel requested for {ocr_id}")
+                }),
+            );
+            Ok(())
+        }
+        OcrServerMessage::Other => Ok(()),
+    }
+}
+
+async fn execute_ocr_request<R: Runtime>(
+    context: OcrExecutionContext<'_, R>,
+    ocr_id: String,
+    client_id: String,
+    owner_user_id: String,
+    request: OcrRequest,
+) -> Result<()> {
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    {
+        let mut active = context.active_ocrs.lock().await;
+        if active.contains_key(&ocr_id) {
+            return Err(anyhow!("OCR {ocr_id} is already running"));
+        }
+        active.insert(ocr_id.clone(), cancel_tx);
+    }
+
+    let _work_permit = context.work_gate.acquire("relay", &ocr_id).await;
+    emit(
+        context.app,
+        "node:job",
+        serde_json::json!({
+            "job_id": ocr_id, "kind": "ocr", "state": "started",
+            "client_id": client_id, "prompt": "remote image", "model": "mere.run vision ocr",
+        }),
+    );
+
+    let result = build_ocr_result(&ocr_id, &owner_user_id, &request, cancel_rx).await;
+    context.active_ocrs.lock().await.remove(&ocr_id);
+    let state = match &result {
+        AgentMessage::OcrResponse { .. } => "done",
+        AgentMessage::OcrError { error, .. } if error == "OCR extraction cancelled" => "cancelled",
+        _ => "failed",
+    };
+    context
+        .out_tx
+        .send(Message::Text(serde_json::to_string(&result)?.into()))?;
+    emit(
+        context.app,
+        "node:job",
+        serde_json::json!({
+            "job_id": ocr_id,
+            "kind": "ocr",
+            "state": state,
+        }),
+    );
+    Ok(())
+}
+
+async fn build_ocr_result(
+    ocr_id: &str,
+    owner_user_id: &str,
+    request: &OcrRequest,
+    cancel: watch::Receiver<bool>,
+) -> AgentMessage {
+    let out_dir = std::env::temp_dir().join("mere-run-node").join("ocr");
+    match mererun::extract_ocr_text(request, &out_dir, ocr_id, cancel).await {
+        Ok(output) => AgentMessage::OcrResponse {
+            ocr_id: ocr_id.to_string(),
+            owner_user_id: Some(owner_user_id.to_string()),
+            text: output.text,
+            tokens_generated: output.tokens_generated,
+        },
+        Err(error) => AgentMessage::OcrError {
+            ocr_id: ocr_id.to_string(),
+            owner_user_id: Some(owner_user_id.to_string()),
+            error: error.to_string(),
+        },
+    }
+}
+
 async fn run_tool(
     req: &ToolRequest,
     tool_id: &str,
@@ -1640,6 +1892,19 @@ async fn upload_output(upload_url: &str, content_type: &str, bytes: Vec<u8>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routes_ocr_messages_to_the_typed_dispatcher() {
+        assert!(is_ocr_message(
+            r#"{"type":"ocr_request","ocr_id":"ocr_123"}"#
+        ));
+        assert!(is_ocr_message(
+            r#"{"type":"ocr_cancel","ocr_id":"ocr_123"}"#
+        ));
+        assert!(!is_ocr_message(
+            r#"{"type":"asr_request","asr_id":"asr_123"}"#
+        ));
+    }
 
     #[test]
     fn connected_auth_errors_distinguish_retry_from_sign_in() {

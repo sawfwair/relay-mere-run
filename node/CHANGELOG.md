@@ -1,5 +1,15 @@
 # mere.run Node changelog
 
+## 0.2.14 - 2026-07-28
+
+- Execute Relay OCR requests through installed LightOnOCR or native
+  Infinity-Parser2 models with bounded image downloads, typed responses, and
+  cooperative cancellation.
+- Advertise OCR only when both a supported checkpoint and the public
+  `mere.run vision ocr` command are available.
+- Normalize batch transcription into one clean transcript with structured
+  sentence timestamps, and terminate the child process when Relay cancels ASR.
+
 ## 0.2.13 - 2026-07-28
 
 - Advertise Relay Talk whenever a compatible speech synthesis model is
