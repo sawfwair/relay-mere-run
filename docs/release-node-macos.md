@@ -54,9 +54,10 @@ Worker or downloads-page edit is required for a normal version bump. The release
 command also accepts overrides:
 
 ```sh
+VERSION="$(node -p "require('./node/package.json').version")"
 NODE_MACOS_R2_BUCKET='<your-release-bucket>' \
-NODE_MACOS_R2_KEY=releases/mere-run-node/macos/mere.run-node-0.2.5-aarch64-notarized.dmg \
-NODE_MACOS_DMG_PATH="node/src-tauri/target/release/bundle/dmg/mere.run node_0.2.5_aarch64.dmg" \
+NODE_MACOS_R2_KEY="releases/mere-run-node/macos/mere.run-node-${VERSION}-aarch64-notarized.dmg" \
+NODE_MACOS_DMG_PATH="node/src-tauri/target/release/bundle/dmg/mere.run node_${VERSION}_aarch64.dmg" \
 ./scripts/release-node-macos.sh
 ```
 

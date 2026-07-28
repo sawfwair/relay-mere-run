@@ -1472,17 +1472,18 @@ mod tests {
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
         let task = tokio::spawn(async move { run_plugin_process(command, &mut cancel_rx).await });
 
-        for _ in 0..100 {
-            if descendant_pid_path.is_file() {
-                break;
+        let descendant_pid = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&descendant_pid_path) {
+                    if let Ok(pid) = contents.trim().parse::<i32>() {
+                        return pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let descendant_pid = std::fs::read_to_string(&descendant_pid_path)
-            .expect("descendant pid")
-            .trim()
-            .parse::<i32>()
-            .expect("numeric descendant pid");
+        })
+        .await
+        .expect("descendant pid");
         cancel_tx.send(true).expect("cancel signal");
         let output = task.await.expect("join").expect("plugin process");
         assert!(output.is_none());

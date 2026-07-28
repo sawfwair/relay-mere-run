@@ -32,8 +32,11 @@ The Rust core (`src-tauri/src/`) is the relay device agent:
   data plus vendor tools when available.
 - `mererun.rs` — wraps the local `mere.run` binary
   (`mere.run image generate --prompt … --model … --output … --width … --height …
-  --seed … [--ref-image …]`, `mere.run speech transcribe`, and
+  --seed … [--ref-image …]`, `mere.run speech transcribe --backend …`, and
   `mere.run text embed`) and discovers models/capabilities via `mere.run`.
+  Live ASR advertises only installed Parakeet and Qwen backends. Relay resolves
+  automatic stream tickets to a ready backend before audio starts, while
+  explicit requests remain pinned through the Node protocol and child command.
 - `plugins.rs` — scans `PATH`, `~/.local/bin`, `~/bin`, `/opt/homebrew/bin`, and
   `/usr/local/bin` for `mere-*` executables that answer `manifest --json`,
   advertises their commands in relay capabilities, runs assigned tool requests,
@@ -92,7 +95,8 @@ Linux artifacts are architecture-specific. Debian packages are the recommended
 Ubuntu/Debian install and AppImages remain the portable fallback. Arm64 is a
 first-class release target for DGX Spark/Blackwell-class machines. Details live in
 [`../docs/release-node-macos.md`](../docs/release-node-macos.md) and
-[`../docs/release-node-linux.md`](../docs/release-node-linux.md).
+[`../docs/release-node-linux.md`](../docs/release-node-linux.md). User-visible
+changes are recorded in [`CHANGELOG.md`](CHANGELOG.md).
 
 On Ubuntu with NVIDIA GB10 graphics, install `libnvidia-egl-gbm1` for WebKitGTK
 hardware rendering. The app automatically uses a compatible renderer when that
@@ -161,10 +165,10 @@ power-efficient scheduling.
 Working: connect, auth, capability advertise, persistent hardware/runtime/model
 inventory and telemetry, lease-aware retry, image/music/video jobs via
 `mere.run`, correct img2img (`--input`/`--strength`), chat via `mere.run text
-chat`, ASR via `mere.run speech transcribe`, embedding via `mere.run text
-embed`, plugin tool jobs via installed `mere-*` companions, result routing
-(POST outputs to relay upload endpoints, then send the returned public URLs),
-per-step image progress, ping, reconnect, live UI.
+chat`, batch and live ASR with explicit Parakeet/Qwen routing, embedding via
+`mere.run text embed`, plugin tool jobs via installed `mere-*` companions,
+result routing (POST outputs to relay upload endpoints, then send the returned
+public URLs), per-step image progress, ping, reconnect, live UI.
 
 Notes / next:
 - `mere.run api serve` is **chat/embedding only** — there is no warm image
