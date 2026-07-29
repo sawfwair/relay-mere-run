@@ -169,6 +169,9 @@ export function supportsAsrBackend(info: AgentInfo, backend: AsrBackend): boolea
 
 export function supportsAsr(info: AgentInfo, asr?: Asr): boolean {
   if (!agentHasModel(info, 'asr') && !agentHasModelPrefix(info, 'speech-asr-')) return false;
+  if (asr?.request.diarize && !agentReportsInstalledModel(info, 'speech-diarization-sortformer')) {
+    return false;
+  }
   return supportsAsrBackend(info, asr?.request.backend ?? 'auto');
 }
 
@@ -875,7 +878,9 @@ export async function assignTalkToAgent(ctx: RelayContext, talk: Talk): Promise<
 }
 
 export async function assignAsrToAgent(ctx: RelayContext, asr: Asr): Promise<boolean> {
-  const preferredModel = asrBackendModel(asr.request.backend ?? 'auto') ?? 'asr';
+  const preferredModel = asr.request.diarize
+    ? 'speech-diarization-sortformer'
+    : asrBackendModel(asr.request.backend ?? 'auto') ?? 'asr';
   const agent = await getOnlineAgent(
     ctx,
     (info) => supportsAsr(info, asr),

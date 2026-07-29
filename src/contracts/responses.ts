@@ -7,7 +7,12 @@ import type {
   TalkStatusResponse,
   ToolStatusResponse,
 } from '../types';
-import { asrSentenceAlignmentSchema, asrTokenAlignmentSchema, toolArtifactSchema } from './messages';
+import {
+  asrSentenceAlignmentSchema,
+  asrSpeakerSegmentSchema,
+  asrTokenAlignmentSchema,
+  toolArtifactSchema,
+} from './messages';
 import { unknownRecordSchema } from './primitives';
 import { chatMessageSchema, toolInputAssetSchema } from './requests';
 
@@ -130,6 +135,8 @@ export const asrStatusResponseSchema = z.object({
     audio_url: z.string(),
     language: z.string().nullable(),
     task: z.enum(['transcribe', 'translate']),
+    backend: z.enum(['auto', 'parakeet', 'qwen']).optional(),
+    diarize: z.boolean(),
     max_tokens: z.number(),
   }).passthrough(),
   result: z.object({
@@ -138,6 +145,7 @@ export const asrStatusResponseSchema = z.object({
     duration_seconds: z.number(),
     token_alignments: z.array(asrTokenAlignmentSchema).optional(),
     sentence_alignments: z.array(asrSentenceAlignmentSchema).optional(),
+    speaker_segments: z.array(asrSpeakerSegmentSchema).optional(),
   }).passthrough().nullable(),
   error: z.string().nullable(),
   created_at: z.string(),

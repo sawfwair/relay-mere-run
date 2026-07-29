@@ -14,14 +14,15 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
 
 use crate::protocol::{
-    AsrBackend, AsrOutput, AsrRequest, AsrSentenceAlignment, AsrStreamingCapabilities, ChatMessage,
-    ChatRequest, EmbedDataRow, EmbedOutput, EmbedRequest, JobKind, JobRequest,
-    ModelInventoryStatus, OcrRequest, RuntimeDiagnostic, TalkRequest,
+    AsrBackend, AsrOutput, AsrRequest, AsrSentenceAlignment, AsrSpeakerSegment,
+    AsrStreamingCapabilities, ChatMessage, ChatRequest, EmbedDataRow, EmbedOutput, EmbedRequest,
+    JobKind, JobRequest, ModelInventoryStatus, OcrRequest, RuntimeDiagnostic, TalkRequest,
 };
 
 const DEFAULT_MODEL: &str = "image-klein-9b";
 const DEFAULT_EMBED_MODEL: &str = "text-embed-qwen3-0.6b";
 const DEFAULT_TTS_MODEL: &str = "speech-tts-qwen3-nano";
+const DIARIZATION_MODEL: &str = "speech-diarization-sortformer";
 const IMAGE_CAPABILITY: &str = "image";
 const TEXT_CAPABILITY: &str = "text";
 const MUSIC_CAPABILITY: &str = "music";
@@ -39,6 +40,7 @@ const ADVERTISABLE_MODEL_CATEGORIES: &[&str] = &[
     "music",
     "video",
     "speech-tts",
+    "speech-diarization",
     "vision-ocr",
 ];
 const ADVERTISABLE_MODEL_PREFIXES: &[&str] = &[
@@ -47,6 +49,7 @@ const ADVERTISABLE_MODEL_PREFIXES: &[&str] = &[
     "music-",
     "video-",
     "speech-tts-",
+    "speech-diarization-",
     "vision-ocr-",
 ];
 const MAX_ASR_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
@@ -242,10 +245,11 @@ fn include_required_runtime_models(
     mut configured: Vec<String>,
     installed: &[String],
 ) -> Vec<String> {
-    for model in installed
-        .iter()
-        .filter(|model| model.starts_with("speech-tts-") || model.starts_with("vision-ocr-"))
-    {
+    for model in installed.iter().filter(|model| {
+        model.starts_with("speech-tts-")
+            || model.starts_with("speech-diarization-")
+            || model.starts_with("vision-ocr-")
+    }) {
         push_unique(&mut configured, model.clone());
     }
     configured
@@ -1183,7 +1187,7 @@ async fn transcribe_speech_with_binary(
         let output = cancellable_command_output(
             binary,
             &args,
-            cancel,
+            cancel.clone(),
             "speech transcription cancelled",
         )
         .await?;
@@ -1194,7 +1198,24 @@ async fn transcribe_speech_with_binary(
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        parse_transcript_output(&stdout, req)
+        let mut transcript = parse_transcript_output(&stdout, req)?;
+        if req.diarize {
+            let diarization = cancellable_command_output(
+                binary,
+                &build_diarize_args(&audio_path),
+                cancel,
+                "speaker diarization cancelled",
+            )
+            .await?;
+            if !diarization.status.success() {
+                let stderr = String::from_utf8_lossy(&diarization.stderr);
+                return Err(anyhow!("mere.run speech diarize failed: {}", stderr.trim()));
+            }
+            transcript.speaker_segments = Some(parse_diarization_output(
+                String::from_utf8_lossy(&diarization.stdout).trim(),
+            )?);
+        }
+        Ok(transcript)
     }
     .await;
     let keep_failed = std::env::var("MERERUN_NODE_KEEP_FAILED_ASR")
@@ -1421,6 +1442,44 @@ fn build_transcribe_args(audio_path: &Path, req: &AsrRequest) -> Vec<String> {
     args
 }
 
+fn build_diarize_args(audio_path: &Path) -> Vec<String> {
+    vec![
+        "speech".to_string(),
+        "diarize".to_string(),
+        audio_path.to_string_lossy().to_string(),
+        "--model".to_string(),
+        DIARIZATION_MODEL.to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+        "--quiet".to_string(),
+    ]
+}
+
+#[derive(serde::Deserialize)]
+struct DiarizationCommandOutput {
+    segments: Vec<AsrSpeakerSegment>,
+}
+
+fn parse_diarization_output(stdout: &str) -> Result<Vec<AsrSpeakerSegment>> {
+    let output: DiarizationCommandOutput = serde_json::from_str(stdout)
+        .map_err(|error| anyhow!("mere.run speech diarize returned invalid JSON: {error}"))?;
+    for (index, segment) in output.segments.iter().enumerate() {
+        if segment.speaker.trim().is_empty()
+            || !segment.start_seconds.is_finite()
+            || !segment.end_seconds.is_finite()
+            || !segment.duration_seconds.is_finite()
+            || segment.start_seconds < 0.0
+            || segment.end_seconds < segment.start_seconds
+            || segment.duration_seconds < 0.0
+        {
+            return Err(anyhow!(
+                "mere.run speech diarize returned an invalid segment at index {index}"
+            ));
+        }
+    }
+    Ok(output.segments)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OcrRuntimeModel {
     LightOn(String),
@@ -1525,6 +1584,7 @@ fn parse_transcript_output(stdout: &str, req: &AsrRequest) -> Result<AsrOutput> 
                 duration_seconds: value.get("duration_seconds").and_then(|v| v.as_f64()),
                 token_alignments: None,
                 sentence_alignments: None,
+                speaker_segments: None,
             });
         }
     }
@@ -1542,6 +1602,7 @@ fn parse_transcript_output(stdout: &str, req: &AsrRequest) -> Result<AsrOutput> 
             duration_seconds,
             token_alignments: None,
             sentence_alignments: Some(sentences),
+            speaker_segments: None,
         });
     }
 
@@ -1551,6 +1612,7 @@ fn parse_transcript_output(stdout: &str, req: &AsrRequest) -> Result<AsrOutput> 
         duration_seconds: None,
         token_alignments: None,
         sentence_alignments: None,
+        speaker_segments: None,
     })
 }
 
@@ -1974,6 +2036,7 @@ mod tests {
                 { "id": "music-acestep", "category": "music", "size": "10 GB" },
                 { "id": "video-ltx23-av-mlx", "category": "video", "size": "48 GB" },
                 { "id": "speech-tts-qwen3-nano", "category": "speech-tts", "size": "4.57 GB" },
+                { "id": "speech-diarization-sortformer", "category": "speech-diarization", "size": "236 MB" },
                 { "id": "speech-asr-qwen3", "category": "speech-asr", "size": "2.47 GB" },
                 { "id": "text-embed-qwen3-0.6b", "category": "text-embed", "size": "1.21 GB" },
                 { "id": "vision-ocr-lighton", "category": "vision-ocr", "size": "4.1 GB" },
@@ -1990,6 +2053,7 @@ mod tests {
                 "music-acestep",
                 "video-ltx23-av-mlx",
                 "speech-tts-qwen3-nano",
+                "speech-diarization-sortformer",
                 "vision-ocr-lighton"
             ]
         );
@@ -2129,6 +2193,7 @@ text-chat-gemma4                 text-chat       installed  11 GB
 music-acestep                    music           installed  10 GB
 video-ltx23-av-mlx               video           installed  48 GB
 speech-tts-qwen3-nano            speech-tts      installed  4.57 GB
+speech-diarization-sortformer    speech-diarization installed 236 MB
 speech-asr-qwen3                 speech-asr      installed  2.47 GB
 text-embed-qwen3-0.6b            text-embed      installed  1.21 GB
 vision-ocr-lighton               vision-ocr      installed  4.1 GB
@@ -2143,6 +2208,7 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
                 "music-acestep",
                 "video-ltx23-av-mlx",
                 "speech-tts-qwen3-nano",
+                "speech-diarization-sortformer",
                 "vision-ocr-lighton"
             ]
         );
@@ -2158,6 +2224,7 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
             "music-acestep".to_string(),
             "video-ltx23-av-mlx".to_string(),
             "speech-tts-qwen3-nano".to_string(),
+            "speech-diarization-sortformer".to_string(),
             "vision-ocr-lighton".to_string(),
             "sfx-woosh-flow".to_string(),
             "image-zimage-max".to_string(),
@@ -2171,6 +2238,7 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
                 "music-acestep",
                 "video-ltx23-av-mlx",
                 "speech-tts-qwen3-nano",
+                "speech-diarization-sortformer",
                 "vision-ocr-lighton",
                 "image-zimage-max"
             ]
@@ -2183,6 +2251,7 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
         let installed = vec![
             "image-zimage-nano".to_string(),
             "speech-tts-qwen3-nano".to_string(),
+            "speech-diarization-sortformer".to_string(),
             "vision-ocr-lighton".to_string(),
         ];
 
@@ -2191,6 +2260,7 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
             vec![
                 "image-klein-nano",
                 "speech-tts-qwen3-nano",
+                "speech-diarization-sortformer",
                 "vision-ocr-lighton"
             ]
         );
@@ -2497,6 +2567,7 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
             language: Some("en".to_string()),
             task: "transcribe".to_string(),
             backend: AsrBackend::Parakeet,
+            diarize: false,
             max_tokens: 448,
         };
         let args = build_transcribe_args(Path::new("/tmp/audio.wav"), &req);
@@ -2521,12 +2592,44 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
     }
 
     #[test]
+    fn builds_diarization_command_and_normalizes_speaker_segments() {
+        assert_eq!(
+            build_diarize_args(Path::new("/tmp/audio.wav")),
+            vec![
+                "speech",
+                "diarize",
+                "/tmp/audio.wav",
+                "--model",
+                "speech-diarization-sortformer",
+                "--format",
+                "json",
+                "--quiet"
+            ]
+        );
+
+        let segments = parse_diarization_output(
+            r#"{"schema_version":1,"segments":[{"speaker":"speaker_2","speaker_index":2,"start_seconds":1.25,"end_seconds":3.5,"duration_seconds":2.25}]}"#,
+        )
+        .expect("diarization output");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].speaker, "speaker_2");
+        assert_eq!(segments[0].speaker_index, 2);
+        assert_eq!(segments[0].start_seconds, 1.25);
+        assert_eq!(segments[0].end_seconds, 3.5);
+        assert!(parse_diarization_output(
+            r#"{"segments":[{"speaker":"","speaker_index":0,"start_seconds":2,"end_seconds":1,"duration_seconds":0}]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
     fn parses_timestamped_transcript_without_duplicating_plain_text() {
         let req = AsrRequest {
             audio_url: "https://example.com/audio.wav".to_string(),
             language: Some("en".to_string()),
             task: "transcribe".to_string(),
             backend: AsrBackend::Parakeet,
+            diarize: false,
             max_tokens: 448,
         };
         let output = parse_transcript_output(
@@ -2571,6 +2674,7 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
             language: None,
             task: "transcribe".to_string(),
             backend: AsrBackend::Auto,
+            diarize: false,
             max_tokens: 0,
         };
         let output =

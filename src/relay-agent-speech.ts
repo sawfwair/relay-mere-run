@@ -130,6 +130,7 @@ export async function handleAsrResponse(
     duration_seconds: msg.duration_seconds ?? 0,
     token_alignments: msg.token_alignments,
     sentence_alignments: msg.sentence_alignments,
+    speaker_segments: msg.speaker_segments,
   };
 	asr.error = null;
 	await recordNodePerformance(

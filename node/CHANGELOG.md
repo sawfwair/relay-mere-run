@@ -1,5 +1,12 @@
 # mere.run Node changelog
 
+## Unreleased
+
+- Route opt-in batch ASR diarization only to Nodes with the native
+  `speech-diarization-sortformer` checkpoint installed.
+- Run `mere.run speech diarize` after transcription and return validated
+  speaker intervals through Relay webhooks and public clients.
+
 ## 0.2.14 - 2026-07-28
 
 - Execute Relay OCR requests through installed LightOnOCR or native

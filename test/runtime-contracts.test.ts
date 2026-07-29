@@ -78,9 +78,17 @@ describe('runtime JSON contracts', () => {
         end_seconds: 2.64,
         tokens: [],
       }],
+      speaker_segments: [{
+        speaker: 'speaker_0',
+        speaker_index: 0,
+        start_seconds: 0,
+        end_seconds: 2.64,
+        duration_seconds: 2.64,
+      }],
     })).toMatchObject({
       type: 'asr_response',
       sentence_alignments: [{ text: 'Clean transcript.' }],
+      speaker_segments: [{ speaker: 'speaker_0' }],
     });
   });
 

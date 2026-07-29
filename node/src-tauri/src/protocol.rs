@@ -437,6 +437,8 @@ pub enum AgentMessage {
         token_alignments: Option<Vec<AsrTokenAlignment>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         sentence_alignments: Option<Vec<AsrSentenceAlignment>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        speaker_segments: Option<Vec<AsrSpeakerSegment>>,
     },
     AsrError {
         asr_id: String,
@@ -656,6 +658,8 @@ pub struct AsrRequest {
     #[serde(default)]
     pub backend: AsrBackend,
     #[serde(default)]
+    pub diarize: bool,
+    #[serde(default)]
     pub max_tokens: u32,
 }
 
@@ -683,6 +687,15 @@ pub struct AsrSentenceAlignment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AsrSpeakerSegment {
+    pub speaker: String,
+    pub speaker_index: u32,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    pub duration_seconds: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsrOutput {
     pub text: String,
     #[serde(default)]
@@ -693,6 +706,8 @@ pub struct AsrOutput {
     pub token_alignments: Option<Vec<AsrTokenAlignment>>,
     #[serde(default)]
     pub sentence_alignments: Option<Vec<AsrSentenceAlignment>>,
+    #[serde(default)]
+    pub speaker_segments: Option<Vec<AsrSpeakerSegment>>,
 }
 
 /// Text embedding request parameters (relay `EmbedRequest`).

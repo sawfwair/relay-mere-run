@@ -1543,6 +1543,7 @@ async fn build_asr_result(
             duration_seconds: output.duration_seconds,
             token_alignments: output.token_alignments,
             sentence_alignments: output.sentence_alignments,
+            speaker_segments: output.speaker_segments,
         },
         Err(error) => AgentMessage::AsrError {
             asr_id: asr_id.to_string(),

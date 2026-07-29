@@ -161,12 +161,22 @@ function isAsrSentence(value: unknown): boolean {
     && value.tokens.every(isAsrToken);
 }
 
+function isAsrSpeakerSegment(value: unknown): boolean {
+  return isRecord(value)
+    && isString(value.speaker)
+    && isNumber(value.speaker_index)
+    && isNumber(value.start_seconds)
+    && isNumber(value.end_seconds)
+    && isNumber(value.duration_seconds);
+}
+
 function isAsrRequest(value: unknown): boolean {
   return isRecord(value)
     && isString(value.audio_url)
     && isNullableString(value.language)
     && isOneOf(value.task, ['transcribe', 'translate'])
     && (value.backend === undefined || isOneOf(value.backend, ['auto', 'parakeet', 'qwen']))
+    && typeof value.diarize === 'boolean'
     && isNumber(value.max_tokens);
 }
 
@@ -178,7 +188,9 @@ function isAsrResult(value: unknown): boolean {
     && (value.token_alignments === undefined
       || (Array.isArray(value.token_alignments) && value.token_alignments.every(isAsrToken)))
     && (value.sentence_alignments === undefined
-      || (Array.isArray(value.sentence_alignments) && value.sentence_alignments.every(isAsrSentence)));
+      || (Array.isArray(value.sentence_alignments) && value.sentence_alignments.every(isAsrSentence)))
+    && (value.speaker_segments === undefined
+      || (Array.isArray(value.speaker_segments) && value.speaker_segments.every(isAsrSpeakerSegment)));
 }
 
 function isEmbedRequest(value: unknown): boolean {
