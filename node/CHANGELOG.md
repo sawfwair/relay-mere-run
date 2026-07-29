@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.15 - 2026-07-29
+
 - Route opt-in batch ASR diarization only to Nodes with the native
   `speech-diarization-sortformer` checkpoint installed.
 - Run `mere.run speech diarize` after transcription and return validated
