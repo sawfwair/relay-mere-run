@@ -56,6 +56,9 @@ export async function handleSubmitJob(
     fps: request.fps,
     num_frames: request.num_frames,
     lyrics: request.lyrics,
+    input_audio_url: request.input_audio_url,
+    audio_start_seconds: request.audio_start_seconds,
+    audio_end_seconds: request.audio_end_seconds,
   };
 
   const job: Job = {

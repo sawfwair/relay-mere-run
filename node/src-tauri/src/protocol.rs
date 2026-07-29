@@ -538,6 +538,11 @@ pub struct JobRequest {
     pub num_frames: Option<u32>,
     #[serde(default)]
     pub lyrics: Option<String>,
+    /// Source audio for native audio-to-video lanes (LTX 2.3 A2Vid).
+    #[serde(default)]
+    pub input_audio_url: Option<String>,
+    #[serde(default)]
+    pub audio_start_seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

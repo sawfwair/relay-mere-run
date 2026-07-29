@@ -887,6 +887,67 @@ pub async fn generate_music(req: &JobRequest, out_dir: &Path, job_id: &str) -> R
     Ok(out_path)
 }
 
+/// Build the `mere.run video generate` argument list. Source audio engages the
+/// native LTX 2.3 audio-to-video lane; the segment length is governed by
+/// `--duration`, so only the start offset is passed alongside the file.
+fn build_video_generate_args(
+    req: &JobRequest,
+    model: &str,
+    out_path: &Path,
+    input_image: Option<&Path>,
+    input_audio: Option<&Path>,
+) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec![
+        "video".into(),
+        "generate".into(),
+        req.prompt.clone().into(),
+        "--model".into(),
+        model.into(),
+        "--output".into(),
+        out_path.into(),
+        "--width".into(),
+        req.width.to_string().into(),
+        "--height".into(),
+        req.height.to_string().into(),
+        "--quiet".into(),
+    ];
+    if let Some(duration) = req.duration_seconds {
+        args.push("--duration".into());
+        args.push(duration.to_string().into());
+    }
+    if let Some(fps) = req.fps {
+        args.push("--fps".into());
+        args.push(fps.to_string().into());
+    }
+    if let Some(num_frames) = req.num_frames {
+        args.push("--num-frames".into());
+        args.push(num_frames.to_string().into());
+    }
+    if let Some(seed) = req.seed {
+        args.push("--seed".into());
+        args.push(seed.to_string().into());
+    }
+    if let Some(image) = input_image {
+        args.push("--image".into());
+        args.push(image.into());
+        if let Some(strength) = req.input_strength {
+            args.push("--image-strength".into());
+            args.push(strength.to_string().into());
+        }
+    }
+    if let Some(audio) = input_audio {
+        args.push("--audio".into());
+        args.push(audio.into());
+        if let Some(start) = req.audio_start_seconds {
+            if start > 0.0 {
+                args.push("--audio-start-time".into());
+                args.push(start.to_string().into());
+            }
+        }
+    }
+    args
+}
+
 pub async fn generate_video(req: &JobRequest, out_dir: &Path, job_id: &str) -> Result<PathBuf> {
     tokio::fs::create_dir_all(out_dir).await.ok();
     let out_path = out_dir.join(format!("{job_id}.mp4"));
@@ -894,33 +955,6 @@ pub async fn generate_video(req: &JobRequest, out_dir: &Path, job_id: &str) -> R
         .model
         .clone()
         .unwrap_or_else(|| "video-ltx23-av-mlx".to_string());
-
-    let mut cmd = Command::new(resolve_mere_run_binary().await);
-    cmd.arg("video")
-        .arg("generate")
-        .arg(&req.prompt)
-        .arg("--model")
-        .arg(&model)
-        .arg("--output")
-        .arg(&out_path)
-        .arg("--width")
-        .arg(req.width.to_string())
-        .arg("--height")
-        .arg(req.height.to_string())
-        .arg("--quiet");
-
-    if let Some(duration) = req.duration_seconds {
-        cmd.arg("--duration").arg(duration.to_string());
-    }
-    if let Some(fps) = req.fps {
-        cmd.arg("--fps").arg(fps.to_string());
-    }
-    if let Some(num_frames) = req.num_frames {
-        cmd.arg("--num-frames").arg(num_frames.to_string());
-    }
-    if let Some(seed) = req.seed {
-        cmd.arg("--seed").arg(seed.to_string());
-    }
 
     let input_path = if let Some(url) = req.input_image_url.as_deref() {
         let p = out_dir.join(format!("{job_id}-video-input.png"));
@@ -937,12 +971,20 @@ pub async fn generate_video(req: &JobRequest, out_dir: &Path, job_id: &str) -> R
     } else {
         None
     };
-    if let Some(p) = input_path.as_ref() {
-        cmd.arg("--image").arg(p);
-        if let Some(strength) = req.input_strength {
-            cmd.arg("--image-strength").arg(strength.to_string());
-        }
-    }
+    let audio_path = if let Some(url) = req.input_audio_url.as_deref() {
+        Some(download_asr_input(url, out_dir).await?)
+    } else {
+        None
+    };
+
+    let mut cmd = Command::new(resolve_mere_run_binary().await);
+    cmd.args(build_video_generate_args(
+        req,
+        &model,
+        &out_path,
+        input_path.as_deref(),
+        audio_path.as_deref(),
+    ));
 
     let output = cmd.output().await?;
     if !output.status.success() {
@@ -2353,6 +2395,99 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
                 "0.2"
             ]
         );
+    }
+
+    #[test]
+    fn builds_video_generate_args_with_audio_to_video_lane() {
+        let req: JobRequest = serde_json::from_value(serde_json::json!({
+            "kind": "video",
+            "prompt": "the band tears through the chorus",
+            "width": 1280,
+            "height": 704,
+            "duration_seconds": 28.42,
+            "fps": 24,
+            "seed": 7,
+            "input_audio_url": "https://relay.example/audio/segment.mp3",
+            "audio_start_seconds": 90.5
+        }))
+        .unwrap();
+        let args = build_video_generate_args(
+            &req,
+            "video-ltx23-a2vid-mlx",
+            Path::new("/tmp/out.mp4"),
+            None,
+            Some(Path::new("/tmp/input.mp3")),
+        );
+        let args: Vec<String> = args
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "video",
+                "generate",
+                "the band tears through the chorus",
+                "--model",
+                "video-ltx23-a2vid-mlx",
+                "--output",
+                "/tmp/out.mp4",
+                "--width",
+                "1280",
+                "--height",
+                "704",
+                "--quiet",
+                "--duration",
+                "28.42",
+                "--fps",
+                "24",
+                "--seed",
+                "7",
+                "--audio",
+                "/tmp/input.mp3",
+                "--audio-start-time",
+                "90.5"
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_video_generate_args_without_audio_or_start_offset() {
+        let req: JobRequest = serde_json::from_value(serde_json::json!({
+            "kind": "video",
+            "prompt": "silent skyline",
+            "width": 768,
+            "height": 512,
+            "input_audio_url": "https://relay.example/audio/segment.mp3",
+            "audio_start_seconds": 0.0
+        }))
+        .unwrap();
+        let with_zero_start = build_video_generate_args(
+            &req,
+            "video-ltx23-av-mlx",
+            Path::new("/tmp/out.mp4"),
+            None,
+            Some(Path::new("/tmp/input.wav")),
+        );
+        let rendered: Vec<String> = with_zero_start
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(rendered.contains(&"--audio".to_string()));
+        assert!(!rendered.contains(&"--audio-start-time".to_string()));
+
+        let no_audio = build_video_generate_args(
+            &req,
+            "video-ltx23-av-mlx",
+            Path::new("/tmp/out.mp4"),
+            None,
+            None,
+        );
+        let rendered: Vec<String> = no_audio
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(!rendered.contains(&"--audio".to_string()));
     }
 
     #[test]
