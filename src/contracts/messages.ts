@@ -3,6 +3,7 @@ import type {
   AsrErrorMessage,
   AsrResponseMessage,
   AsrSentenceAlignment,
+  AsrSpeakerSegment,
   AsrTokenAlignment,
   ChatErrorMessage,
   ChatResponseMessage,
@@ -83,6 +84,14 @@ export const asrSentenceAlignmentSchema = z.object({
   tokens: z.array(asrTokenAlignmentSchema),
 }).passthrough() satisfies z.ZodType<AsrSentenceAlignment>;
 
+export const asrSpeakerSegmentSchema = z.object({
+  speaker: z.string(),
+  speaker_index: z.number().int().nonnegative(),
+  start_seconds: z.number().nonnegative(),
+  end_seconds: z.number().nonnegative(),
+  duration_seconds: z.number().nonnegative(),
+}).passthrough() satisfies z.ZodType<AsrSpeakerSegment>;
+
 export const asrResponseMessageSchema = z.object({
   type: z.literal('asr_response'),
   asr_id: z.string(),
@@ -92,6 +101,7 @@ export const asrResponseMessageSchema = z.object({
   duration_seconds: z.number().optional(),
   token_alignments: z.array(asrTokenAlignmentSchema).optional(),
   sentence_alignments: z.array(asrSentenceAlignmentSchema).optional(),
+  speaker_segments: z.array(asrSpeakerSegmentSchema).optional(),
 }).passthrough() satisfies z.ZodType<AsrResponseMessage>;
 
 export const asrErrorMessageSchema = z.object({

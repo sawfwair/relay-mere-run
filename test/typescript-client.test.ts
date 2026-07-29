@@ -146,6 +146,7 @@ describe('TypeScript client', () => {
           audio_url: 'https://assets.example/audio.wav',
           language: null,
           task: 'transcribe',
+          diarize: false,
           max_tokens: 512,
         },
       } : {

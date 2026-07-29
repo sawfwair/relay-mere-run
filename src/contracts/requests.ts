@@ -62,6 +62,7 @@ export const submitAsrRequestSchema = z.object({
   language: z.string().optional(),
   task: z.enum(['transcribe', 'translate']).optional(),
   backend: z.enum(['auto', 'parakeet', 'qwen']).optional(),
+  diarize: z.boolean().optional(),
   max_tokens: z.number().optional(),
   webhook_url: z.string().optional(),
 }).passthrough().superRefine((request, context) => {

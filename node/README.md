@@ -169,7 +169,7 @@ Working: connect, auth, capability advertise, persistent hardware/runtime/model
 inventory and telemetry, lease-aware retry, image/music/video jobs via
 `mere.run`, correct img2img (`--input`/`--strength`), chat via `mere.run text
 chat`, Qwen speech synthesis, batch and live ASR with explicit Parakeet/Qwen
-routing, embedding via `mere.run text embed`, plugin tool jobs via installed
+routing, optional native Sortformer speaker diarization for batch ASR, embedding via `mere.run text embed`, plugin tool jobs via installed
 `mere-*` companions, result routing (POST outputs to relay upload endpoints,
 then send the returned public URLs), per-step image progress, ping, reconnect,
 live UI.

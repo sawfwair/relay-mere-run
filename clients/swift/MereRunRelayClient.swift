@@ -349,6 +349,7 @@ public struct MereRunRelaySubmitAsrRequest: Codable, Sendable {
     public var language: String?
     public var task: MereRunRelayAsrTask?
     public var backend: MereRunRelayAsrBackend?
+    public var diarize: Bool?
     public var maxTokens: Int?
 
     public init(
@@ -356,12 +357,14 @@ public struct MereRunRelaySubmitAsrRequest: Codable, Sendable {
         language: String? = nil,
         task: MereRunRelayAsrTask? = .transcribe,
         backend: MereRunRelayAsrBackend? = nil,
+        diarize: Bool? = nil,
         maxTokens: Int? = nil
     ) {
         self.audioUrl = audioUrl
         self.language = language
         self.task = task
         self.backend = backend
+        self.diarize = diarize
         self.maxTokens = maxTokens
     }
 }
@@ -378,13 +381,23 @@ public struct MereRunRelayAsrRequestPayload: Codable, Sendable {
     public let language: String?
     public let task: MereRunRelayAsrTask
     public let backend: MereRunRelayAsrBackend?
+    public let diarize: Bool
     public let maxTokens: Int
+}
+
+public struct MereRunRelayAsrSpeakerSegment: Codable, Sendable {
+    public let speaker: String
+    public let speakerIndex: Int
+    public let startSeconds: Double
+    public let endSeconds: Double
+    public let durationSeconds: Double
 }
 
 public struct MereRunRelayAsrResult: Codable, Sendable {
     public let text: String
     public let language: String?
     public let durationSeconds: Double
+    public let speakerSegments: [MereRunRelayAsrSpeakerSegment]?
 }
 
 public struct MereRunRelayAsrStatusResponse: Codable, Sendable {

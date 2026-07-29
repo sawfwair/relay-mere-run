@@ -973,13 +973,17 @@ describe('relay regressions', () => {
     }
   });
 
-  it('persists and returns ASR alignments when provided', async () => {
+  it('routes opt-in diarization and persists speaker segments with ASR alignments', async () => {
     const userId = newUserId('asr-alignments');
-    const { relay, ws } = await connectAgent(userId, capabilitiesWithModels(['asr']));
+    const { relay, ws } = await connectAgent(
+      userId,
+      capabilitiesWithModels(['asr', 'speech-diarization-sortformer'])
+    );
     try {
       const submitResponse = await submitAsr(relay, userId, {
         audio_url: 'https://example.com/audio.wav',
         task: 'transcribe',
+        diarize: true,
       });
       expect(submitResponse.status).toBe(200);
       const submitJson = await readJson<JsonRecord>(submitResponse);
@@ -989,7 +993,7 @@ describe('relay regressions', () => {
       const assignment = await waitForWebSocketJson<JsonRecord>(ws);
       expect(assignment.type).toBe('asr_request');
       expect(assignment.asr_id).toBe(asrId);
-      expect(assignment.request).toMatchObject({ backend: 'auto' });
+      expect(assignment.request).toMatchObject({ backend: 'auto', diarize: true });
 
       const tokenAlignments = [
         {
@@ -1009,6 +1013,15 @@ describe('relay regressions', () => {
           tokens: tokenAlignments,
         },
       ];
+      const speakerSegments = [
+        {
+          speaker: 'speaker_0',
+          speaker_index: 0,
+          start_seconds: 0,
+          end_seconds: 0.4,
+          duration_seconds: 0.4,
+        },
+      ];
 
       ws.send(
         JSON.stringify({
@@ -1020,6 +1033,7 @@ describe('relay regressions', () => {
           duration_seconds: 0.4,
           token_alignments: tokenAlignments,
           sentence_alignments: sentenceAlignments,
+          speaker_segments: speakerSegments,
         })
       );
 
@@ -1033,6 +1047,7 @@ describe('relay regressions', () => {
           duration_seconds: 0.4,
           token_alignments: tokenAlignments,
           sentence_alignments: sentenceAlignments,
+          speaker_segments: speakerSegments,
         });
       });
     } finally {

@@ -273,6 +273,7 @@ export interface AsrRequest {
   language: string | null;
   task: AsrTask;
   backend?: AsrBackend;
+  diarize: boolean;
   max_tokens: number;
 }
 
@@ -292,12 +293,21 @@ export interface AsrSentenceAlignment {
   tokens: AsrTokenAlignment[];
 }
 
+export interface AsrSpeakerSegment {
+  speaker: string;
+  speaker_index: number;
+  start_seconds: number;
+  end_seconds: number;
+  duration_seconds: number;
+}
+
 export interface AsrResult {
   text: string;
   language: string | null;
   duration_seconds: number;
   token_alignments?: AsrTokenAlignment[];
   sentence_alignments?: AsrSentenceAlignment[];
+  speaker_segments?: AsrSpeakerSegment[];
 }
 
 export interface SubmitAsrRequest {
@@ -305,6 +315,7 @@ export interface SubmitAsrRequest {
   language?: string;
   task?: AsrTask;
   backend?: AsrBackend;
+  diarize?: boolean;
   max_tokens?: number;
 }
 

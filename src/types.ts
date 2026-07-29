@@ -1222,6 +1222,7 @@ export interface AsrRequest {
   language: string | null;
   task: 'transcribe' | 'translate';
   backend?: AsrBackend;
+  diarize: boolean;
   max_tokens: number;
 }
 
@@ -1241,6 +1242,14 @@ export interface AsrSentenceAlignment {
   tokens: AsrTokenAlignment[];
 }
 
+export interface AsrSpeakerSegment {
+  speaker: string;
+  speaker_index: number;
+  start_seconds: number;
+  end_seconds: number;
+  duration_seconds: number;
+}
+
 export interface Asr {
   asr_id: string;
   user_id: string;
@@ -1254,6 +1263,7 @@ export interface Asr {
     duration_seconds: number;
     token_alignments?: AsrTokenAlignment[];
     sentence_alignments?: AsrSentenceAlignment[];
+    speaker_segments?: AsrSpeakerSegment[];
   } | null;
   error: string | null;
   created_at: string;
@@ -1282,6 +1292,7 @@ export interface AsrResponseMessage {
   duration_seconds?: number;
   token_alignments?: AsrTokenAlignment[];
   sentence_alignments?: AsrSentenceAlignment[];
+  speaker_segments?: AsrSpeakerSegment[];
 }
 
 export interface AsrErrorMessage {
@@ -1297,6 +1308,7 @@ export interface SubmitAsrRequest {
   language?: string;
   task?: 'transcribe' | 'translate';
   backend?: AsrBackend;
+  diarize?: boolean;
   max_tokens?: number;
   webhook_url?: string;
 }

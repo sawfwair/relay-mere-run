@@ -26,6 +26,7 @@ export async function handleSubmitAsr(
     language: request.language ?? null,
     task: request.task ?? 'transcribe',
     backend: request.backend ?? 'auto',
+    diarize: request.diarize ?? false,
     max_tokens: request.max_tokens ?? 448,
   };
 

@@ -86,9 +86,11 @@ const asrRequest: SubmitAsrRequest = {
   audio_url: uploaded.url,
   task: 'transcribe',
   backend: 'parakeet',
+  diarize: true,
 };
 const finalAsr = await client.asr(asrRequest);
 console.log(finalAsr.result?.text);
+console.log(finalAsr.result?.speaker_segments);
 await client.cancelAsr(finalAsr.asr_id);
 
 const ocrImage = await fetch('/tmp/page.png').then((r) => r.arrayBuffer());
@@ -109,6 +111,7 @@ await client.cancelOcr(finalOcr.ocr_id);
 - `uploadInputImage` accepts `Uint8Array | ArrayBuffer` for img2img prep.
 - `uploadAsrInputAudio` uploads audio for ASR and returns a relay URL.
 - ASR `backend` accepts `auto`, `parakeet`, or `qwen`; omitted requests preserve the `auto` default.
+- ASR `diarize: true` adds Sortformer speaker intervals when the selected Node has `speech-diarization-sortformer` installed.
 - `uploadOcrInputImage` uploads images for OCR and returns a relay URL.
 - `talk` supports direct base64 return (`direct_audio`) or URL-based delivery.
 - HTTP responses and SSE events are validated in `runtime-contracts.ts`; a
