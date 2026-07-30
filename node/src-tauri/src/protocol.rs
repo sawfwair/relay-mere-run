@@ -779,7 +779,7 @@ pub enum ServerMessage {
         upload_url: String,
         #[serde(default)]
         direct_image: bool,
-        request: JobRequest,
+        request: Box<JobRequest>,
     },
     ChatRequest {
         chat_id: String,
