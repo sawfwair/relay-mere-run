@@ -553,6 +553,12 @@ pub struct JobRequest {
     pub input_audio_url: Option<String>,
     #[serde(default)]
     pub audio_start_seconds: Option<f64>,
+    /// Optional end keyframe: conditions the final frame. Only used when the
+    /// job also carries an input image (the runtime requires --image).
+    #[serde(default)]
+    pub end_image_url: Option<String>,
+    #[serde(default)]
+    pub end_image_strength: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

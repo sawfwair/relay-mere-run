@@ -1042,6 +1042,7 @@ fn build_video_generate_args(
     model: &str,
     out_path: &Path,
     input_image: Option<&Path>,
+    end_image: Option<&Path>,
     input_audio: Option<&Path>,
 ) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = vec![
@@ -1081,6 +1082,14 @@ fn build_video_generate_args(
             args.push("--image-strength".into());
             args.push(strength.to_string().into());
         }
+        if let Some(end) = end_image {
+            args.push("--end-image".into());
+            args.push(end.into());
+            if let Some(strength) = req.end_image_strength {
+                args.push("--end-image-strength".into());
+                args.push(strength.to_string().into());
+            }
+        }
     }
     if let Some(audio) = input_audio {
         args.push("--audio".into());
@@ -1118,6 +1127,13 @@ pub async fn generate_video(req: &JobRequest, out_dir: &Path, job_id: &str) -> R
     } else {
         None
     };
+    let end_path = if let (Some(url), true) = (req.end_image_url.as_deref(), input_path.is_some()) {
+        let p = out_dir.join(format!("{job_id}-video-end.png"));
+        download_to(url, &p).await?;
+        Some(p)
+    } else {
+        None
+    };
     let audio_path = if let Some(url) = req.input_audio_url.as_deref() {
         Some(download_asr_input(url, out_dir).await?)
     } else {
@@ -1130,6 +1146,7 @@ pub async fn generate_video(req: &JobRequest, out_dir: &Path, job_id: &str) -> R
         &model,
         &out_path,
         input_path.as_deref(),
+        end_path.as_deref(),
         audio_path.as_deref(),
     ));
 
@@ -2766,6 +2783,7 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
             "video-ltx23-a2vid-mlx",
             Path::new("/tmp/out.mp4"),
             None,
+            None,
             Some(Path::new("/tmp/input.mp3")),
         );
         let args: Vec<String> = args
@@ -2802,6 +2820,66 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
     }
 
     #[test]
+    fn builds_video_generate_args_with_end_keyframe() {
+        let req: JobRequest = serde_json::from_value(serde_json::json!({
+            "kind": "video",
+            "prompt": "the chorus lands on a wide tableau",
+            "width": 1024,
+            "height": 576,
+            "input_image_url": "https://relay.example/frames/start.png",
+            "end_image_url": "https://relay.example/frames/end.png",
+            "end_image_strength": 0.9
+        }))
+        .unwrap();
+        let args = build_video_generate_args(
+            &req,
+            "video-ltx23-a2vid-mlx",
+            Path::new("/tmp/out.mp4"),
+            Some(Path::new("/tmp/start.png")),
+            Some(Path::new("/tmp/end.png")),
+            None,
+        );
+        let rendered: Vec<String> = args
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let image_at = rendered.iter().position(|a| a == "--image").unwrap();
+        assert_eq!(rendered[image_at + 1], "/tmp/start.png");
+        let end_at = rendered.iter().position(|a| a == "--end-image").unwrap();
+        assert_eq!(rendered[end_at + 1], "/tmp/end.png");
+        let strength_at = rendered
+            .iter()
+            .position(|a| a == "--end-image-strength")
+            .unwrap();
+        assert_eq!(rendered[strength_at + 1], "0.9");
+    }
+
+    #[test]
+    fn ignores_end_keyframe_without_a_start_image() {
+        let req: JobRequest = serde_json::from_value(serde_json::json!({
+            "kind": "video",
+            "prompt": "no anchor here",
+            "width": 768,
+            "height": 512,
+            "end_image_url": "https://relay.example/frames/end.png"
+        }))
+        .unwrap();
+        let rendered: Vec<String> = build_video_generate_args(
+            &req,
+            "video-ltx23-av-mlx",
+            Path::new("/tmp/out.mp4"),
+            None,
+            Some(Path::new("/tmp/end.png")),
+            None,
+        )
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+        assert!(!rendered.contains(&"--end-image".to_string()));
+        assert!(!rendered.contains(&"--image".to_string()));
+    }
+
+    #[test]
     fn builds_video_generate_args_without_audio_or_start_offset() {
         let req: JobRequest = serde_json::from_value(serde_json::json!({
             "kind": "video",
@@ -2817,6 +2895,7 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
             "video-ltx23-av-mlx",
             Path::new("/tmp/out.mp4"),
             None,
+            None,
             Some(Path::new("/tmp/input.wav")),
         );
         let rendered: Vec<String> = with_zero_start
@@ -2830,6 +2909,7 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
             &req,
             "video-ltx23-av-mlx",
             Path::new("/tmp/out.mp4"),
+            None,
             None,
             None,
         );

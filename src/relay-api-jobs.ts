@@ -59,6 +59,8 @@ export async function handleSubmitJob(
     input_audio_url: request.input_audio_url,
     audio_start_seconds: request.audio_start_seconds,
     audio_end_seconds: request.audio_end_seconds,
+    end_image_url: request.end_image_url,
+    end_image_strength: request.end_image_strength,
   };
 
   const job: Job = {
