@@ -2106,7 +2106,7 @@ dependencies = [
 
 [[package]]
 name = "mere-run-node"
-version = "0.2.15"
+version = "0.2.16"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2117,6 +2117,7 @@ dependencies = [
  "libc",
  "objc2-foundation",
  "reqwest 0.12.28",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

@@ -1,6 +1,6 @@
 [package]
 name = "mere-run-node"
-version = "0.2.15"
+version = "0.2.16"
 description = "mere.run node — a generation node for the mere.run relay"
 authors = ["mere.run"]
 license = "MIT"
@@ -27,6 +27,7 @@ tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+semver = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "io-util", "fs", "net"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }

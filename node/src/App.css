@@ -101,6 +101,18 @@ button { color: inherit; }
 .capability-copy small { display: block; color: #858c95; font: 10.5px/1.45 ui-monospace, "SFMono-Regular", Menlo, monospace; overflow-wrap: anywhere; }
 
 .settings-view { max-width: 760px; }
+.runtime-panel { margin-bottom: 16px; padding: 14px; border: 1px solid #d4d9e0; border-radius: 7px; background: #fff; }
+.runtime-panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.runtime-panel-heading h3 { margin: 0; font-size: 14px; }
+.runtime-panel-heading p { margin: 4px 0 0; color: #6d7580; font-size: 11.5px; line-height: 1.45; }
+.runtime-list { display: grid; gap: 7px; margin-top: 12px; }
+.runtime-row { padding: 10px; border: 1px solid #e0e3e7; border-radius: 6px; background: #f8f9fa; }
+.runtime-row.selected { border-color: #a9c0e9; background: #f2f6fd; }
+.runtime-copy > div { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.runtime-copy strong { margin-right: auto; font-size: 12.5px; }
+.runtime-copy code { display: block; margin-top: 6px; color: #394453; overflow-wrap: anywhere; font: 10.5px/1.45 ui-monospace, "SFMono-Regular", Menlo, monospace; }
+.runtime-copy small { display: block; margin-top: 4px; color: #747d88; font-size: 10.5px; line-height: 1.45; }
+.runtime-pin-note { margin: 10px 0 0; color: #76520f; font-size: 11px; }
 .field { display: grid; grid-template-columns: 130px minmax(0, 1fr); align-items: center; gap: 14px; min-height: 48px; border-bottom: 1px solid #dde1e6; }
 .field > span { color: #5d6672; font-size: 12px; font-weight: 600; }
 .field input { width: 100%; min-width: 0; height: 32px; padding: 5px 8px; border: 1px solid #cfd4db; border-radius: 5px; background: #fff; }
@@ -116,6 +128,9 @@ button { color: inherit; }
 .notice { gap: 8px; margin-bottom: 12px; padding: 9px 10px; border: 1px solid; border-radius: 6px; font-size: 11.5px; }
 .notice.warning { color: #77500d; background: #fff6df; border-color: #ead39f; }
 .notice.error { color: #98202b; background: #fff0f1; border-color: #e9bdc1; }
+.runtime-notice { margin-top: 16px; margin-bottom: 0; }
+.runtime-notice span { flex: 1; }
+.runtime-notice button { padding: 0; border: 0; border-bottom: 1px solid currentColor; background: transparent; color: inherit; cursor: pointer; font-weight: 700; font-size: 11px; }
 .empty-state { min-height: 130px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; color: #8a929d; border: 1px dashed #ccd1d8; border-radius: 7px; font-size: 12px; }
 .signed-out { min-height: calc(100vh - 130px); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 13px; color: #68717d; }
 .signed-out h2 { margin: 0; color: #262b31; font-size: 18px; letter-spacing: 0; }

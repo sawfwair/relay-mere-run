@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.2.16 - 2026-08-03
+
+- Discover every trusted `mere.run` installation, select the newest binary
+  that satisfies the current runtime contract, and show conflicting or legacy
+  binaries in the Node UI. Explicit `MERERUN_BIN` pins remain authoritative and
+  are never silently overridden.
+
 ## 0.2.15 - 2026-07-29
 
 - Route opt-in batch ASR diarization only to Nodes with the native
