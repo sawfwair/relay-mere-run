@@ -13,6 +13,7 @@ mod native_video;
 mod plugins;
 mod process_activity;
 mod protocol;
+mod runtime_binary;
 mod work_gate;
 
 use std::path::PathBuf;
@@ -373,6 +374,13 @@ async fn discover_models() -> Result<ModelDiscovery, String> {
 }
 
 #[tauri::command]
+async fn inspect_runtime_binaries(
+    refresh: Option<bool>,
+) -> runtime_binary::RuntimeBinaryResolution {
+    runtime_binary::resolution(refresh.unwrap_or(false)).await
+}
+
+#[tauri::command]
 async fn list_relay_activity(app: AppHandle) -> Result<Vec<NodeActivityItem>, String> {
     let response = relay_request(&app, reqwest::Method::GET, "/api/fleet").await?;
     let status = response.status();
@@ -513,6 +521,7 @@ pub fn run() {
             resume_node,
             node_running,
             discover_models,
+            inspect_runtime_binaries,
             list_relay_activity,
             list_capability_packs,
             install_capability_pack,

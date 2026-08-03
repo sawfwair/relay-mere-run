@@ -69,59 +69,8 @@ async fn command_supports(args: &[&str]) -> bool {
     }
 }
 
-fn configured_mere_run_binary() -> Option<PathBuf> {
-    let value = std::env::var("MERERUN_BIN").ok()?;
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(trimmed))
-    }
-}
-
-fn common_mere_run_paths() -> Vec<PathBuf> {
-    let mut paths = vec![
-        PathBuf::from("/usr/local/bin/mere.run"),
-        PathBuf::from("/opt/homebrew/bin/mere.run"),
-    ];
-
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        paths.push(home.join(".local/bin/mere.run"));
-        paths.push(home.join("bin/mere.run"));
-    }
-
-    paths
-}
-
 pub(crate) async fn resolve_mere_run_binary() -> PathBuf {
-    if let Some(configured) = configured_mere_run_binary() {
-        return configured;
-    }
-
-    for path in common_mere_run_paths() {
-        if path.is_file() {
-            return path;
-        }
-    }
-
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let lookup_commands = [
-        ("/usr/bin/which", vec!["mere.run"]),
-        (shell.as_str(), vec!["-lc", "command -v mere.run"]),
-    ];
-    for (program, args) in lookup_commands {
-        if let Ok(out) = Command::new(program).args(args).output().await {
-            if out.status.success() {
-                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return PathBuf::from(path);
-                }
-            }
-        }
-    }
-
-    PathBuf::from("mere.run")
+    crate::runtime_binary::selected_binary().await
 }
 
 pub(crate) async fn mere_run_output(args: &[&str]) -> std::io::Result<Output> {

@@ -5,7 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as autostartEnabled } from "@tauri-apps/plugin-autostart";
 import {
-	Activity, Blocks, ChevronDown, Cpu, ExternalLink, Link2,
+	Activity, AlertTriangle, Blocks, ChevronDown, Cpu, ExternalLink, Link2,
 	LoaderCircle, LogOut, Pause, Play, RefreshCw, Search, Server,
 	Settings, Square,
 } from "lucide-react";
@@ -21,6 +21,9 @@ type NodePreferences = { schema: string; relayUrl: string; deviceName: string; m
 type ModelDiscovery = { installedModels: string[]; capabilityModels: string[] };
 type ActivityItem = { id: string; title: string; subtitle: string; status: string; progress?: number; model?: string; error?: string; updatedAt: number };
 type CapabilityPack = { id: string; title: string; description: string; version?: string; installed: boolean; ready: boolean; installable: boolean; commands: string[]; missingCommands: string[] };
+type RuntimeContract = "status_json" | "legacy" | "unavailable";
+type RuntimeBinaryCandidate = { path: string; source: string; version?: string | null; contract: RuntimeContract; features: string[]; selected: boolean; reason?: string | null };
+export type RuntimeBinaryResolution = { selectedPath?: string | null; selectedVersion?: string | null; pinned: boolean; conflict: boolean; selectionReason: string; candidates: RuntimeBinaryCandidate[] };
 type Tab = "activity" | "capabilities" | "models" | "settings";
 
 const DEFAULT_CONFIG: NodePreferences = {
@@ -49,6 +52,51 @@ export function nodePhase(status: Status, control: ControlStatus): "online" | "c
 	return status.running ? "connecting" : "offline";
 }
 
+export function runtimeNotice(resolution: RuntimeBinaryResolution | null): { tone: "warning" | "error"; message: string } | null {
+	if (!resolution) return null;
+	const selected = resolution.candidates.find((candidate) => candidate.selected);
+	if (!selected) return { tone: "error", message: "No usable mere.run runtime was found. Node capabilities are unavailable." };
+	if (selected.contract === "unavailable") return {
+		tone: "error",
+		message: `The selected mere.run runtime at ${selected.path} could not satisfy a supported runtime contract.`,
+	};
+	if (resolution.pinned && resolution.conflict) return {
+		tone: "warning",
+		message: `Using the pinned mere.run${selected.version ? ` ${selected.version}` : ""}; ${resolution.candidates.length - 1} other installation${resolution.candidates.length === 2 ? " was" : "s were"} not selected.`,
+	};
+	if (selected.contract !== "status_json") return {
+		tone: "warning",
+		message: `Using a legacy mere.run${selected.version ? ` ${selected.version}` : ""}. Newer Node capabilities may be unavailable.`,
+	};
+	if (resolution.conflict) return {
+		tone: "warning",
+		message: `Using mere.run${selected.version ? ` ${selected.version}` : ""}; ${resolution.candidates.length - 1} older or incompatible installation${resolution.candidates.length === 2 ? " was" : "s were"} skipped.`,
+	};
+	return null;
+}
+
+function runtimeContractLabel(contract: RuntimeContract): string {
+	if (contract === "status_json") return "compatible";
+	if (contract === "legacy") return "legacy";
+	return "unavailable";
+}
+
+function RuntimeNoticeBanner({ resolution, signedIn, onReview }: { resolution: RuntimeBinaryResolution | null; signedIn: boolean; onReview: () => void }): ReactElement | null {
+	const notice = runtimeNotice(resolution);
+	if (!notice) return null;
+	return <div className={`notice runtime-notice ${notice.tone}`} role="status"><AlertTriangle size={16} /><span>{notice.message}</span>{signedIn && <button type="button" onClick={onReview}>Review runtimes</button>}</div>;
+}
+
+function RuntimePanel({ resolution, busy, running, onRescan }: { resolution: RuntimeBinaryResolution | null; busy: boolean; running: boolean; onRescan: () => void }): ReactElement {
+	return <section className="runtime-panel" aria-labelledby="runtime-heading">
+		<div className="runtime-panel-heading"><div><h3 id="runtime-heading">mere.run runtime</h3><p>{resolution?.selectionReason || "Inspecting installed runtimes…"}</p></div><button className="command compact" onClick={onRescan} disabled={busy || running} title={running ? "Stop Node before changing runtime selection" : "Rescan installed runtimes"}><RefreshCw className={busy ? "spin" : ""} size={15} /> Rescan</button></div>
+		{resolution && <div className="runtime-list">{resolution.candidates.map((candidate) => <article className={`runtime-row ${candidate.selected ? "selected" : ""}`} key={`${candidate.source}:${candidate.path}`}>
+			<div className="runtime-copy"><div><strong>{candidate.version ? `mere.run ${candidate.version}` : "mere.run · version unknown"}</strong><span className={`state-pill ${candidate.contract === "status_json" ? "ok" : candidate.contract === "legacy" ? "warn" : "error"}`}>{candidate.selected ? "selected" : runtimeContractLabel(candidate.contract)}</span>{candidate.source === "MERERUN_BIN pin" && <span className="state-pill neutral">pinned</span>}</div><code>{candidate.path}</code><small>{candidate.source}{candidate.features.length ? ` · ${candidate.features.join(", ")}` : ""}{candidate.reason ? ` · ${candidate.reason}` : ""}</small></div>
+		</article>)}</div>}
+		{resolution?.pinned && <p className="runtime-pin-note">MERERUN_BIN is authoritative. The Node reports conflicts but will not override your pin.</p>}
+	</section>;
+}
+
 function App(): ReactElement {
   const [config, setConfig] = useState<NodePreferences>(DEFAULT_CONFIG); const [configLoaded, setConfigLoaded] = useState(false);
   const [signedIn, setSignedIn] = useState(false); const [auth, setAuth] = useState<AuthFlow>({ status: "idle" });
@@ -56,6 +104,7 @@ function App(): ReactElement {
 	const [control, setControl] = useState<ControlStatus>({ running: false, phase: "stopped", message: "stopped", accepting: false });
 	const [activities, setActivities] = useState<ActivityItem[]>([]);
 	const [capabilityPacks, setCapabilityPacks] = useState<CapabilityPack[]>([]);
+	const [runtimeResolution, setRuntimeResolution] = useState<RuntimeBinaryResolution | null>(null);
 	const [logs, setLogs] = useState<LogEvent[]>([]); const [diagnostics, setDiagnostics] = useState<string[]>([]);
 	const [tab, setTab] = useState<Tab>("activity"); const [busy, setBusy] = useState("");
 	const [modelQuery, setModelQuery] = useState("");
@@ -86,6 +135,7 @@ function App(): ReactElement {
       }),
       invoke<boolean>("node_running").then((running) => setStatus((current) => ({ ...current, running }))),
       invoke<{ signed_in: boolean }>("auth_status").then((value) => setSignedIn(value.signed_in)),
+		invoke<RuntimeBinaryResolution>("inspect_runtime_binaries", { refresh: false }).then(setRuntimeResolution),
     ]).catch(() => setConfigLoaded(true));
     return (): void => subscriptions.forEach((subscription) => void subscription.then((unlisten) => unlisten()));
 	}, [mergeActivities]);
@@ -151,6 +201,16 @@ function App(): ReactElement {
 			setBusy("");
 		}
 	}
+	async function rescanRuntime(): Promise<void> {
+		setBusy("runtime");
+		try {
+			setRuntimeResolution(await invoke<RuntimeBinaryResolution>("inspect_runtime_binaries", { refresh: true }));
+		} catch (error) {
+			setLogs((current) => [...current, { level: "error", message: String(error) }].slice(-120));
+		} finally {
+			setBusy("");
+		}
+	}
 	function refreshDiagnostics(): void { setDiagnostics(logs.map((entry) => `${entry.level}: ${entry.message}`).slice(-120)); }
   async function setLaunchAtLogin(enabled: boolean): Promise<void> {
     if (enabled) await enableAutostart(); else await disableAutostart();
@@ -170,6 +230,7 @@ function App(): ReactElement {
         {status.running && <button className="icon-button danger" onClick={() => void stop()} disabled={Boolean(busy)} title="Stop after current job"><Square size={16} fill="currentColor" /></button>}
       </div>}
     </header>
+	<RuntimeNoticeBanner resolution={runtimeResolution} signedIn={signedIn} onReview={() => setTab("settings")} />
 
     {auth.status === "pending" ? <section className="device-auth"><p>mere.world/device</p><strong>{auth.userCode}</strong><button className="command" onClick={() => void openUrl(auth.verifyUrl)}><ExternalLink size={16} /> Open mere.world</button></section>
       : !signedIn ? <section className="signed-out"><Server size={32} strokeWidth={1.5} /><h2>Sign in to this Node</h2><button className="command primary" onClick={() => void signIn()} disabled={Boolean(busy)}>{auth.status === "starting" ? <LoaderCircle className="spin" size={16} /> : <Link2 size={16} />} Sign in with mere.world</button>{auth.status === "failed" && <p className="error-copy">{auth.message}</p>}</section>
@@ -203,6 +264,7 @@ function App(): ReactElement {
 
         {tab === "settings" && <section className="view settings-view" aria-labelledby="settings-heading">
 			<div className="view-heading"><div><h2 id="settings-heading">Node settings</h2><p>One Relay connection for all work</p></div></div>
+		  <RuntimePanel resolution={runtimeResolution} busy={busy === "runtime"} running={status.running} onRescan={() => void rescanRuntime()} />
           <label className="field"><span>Device name</span><input value={config.deviceName} disabled={status.running} onChange={(event) => setConfig((current) => ({ ...current, deviceName: event.target.value }))} placeholder="this machine" /></label>
           <label className="field"><span>Relay URL</span><input value={config.relayUrl} disabled={status.running} onChange={(event) => setConfig((current) => ({ ...current, relayUrl: event.target.value }))} spellCheck={false} /></label>
 			<label className="check-row"><input type="checkbox" checked={config.launchAtLogin} onChange={(event) => void setLaunchAtLogin(event.target.checked)} /><span>Launch Node at login</span></label>
