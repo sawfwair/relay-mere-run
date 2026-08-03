@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.16 - 2026-08-03
+
 - Discover every trusted `mere.run` installation, select the newest binary
   that satisfies the current runtime contract, and show conflicting or legacy
   binaries in the Node UI. Explicit `MERERUN_BIN` pins remain authoritative and
