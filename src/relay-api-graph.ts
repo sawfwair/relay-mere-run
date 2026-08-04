@@ -59,7 +59,18 @@ const INPUT_TYPES = new Set([
   'asset_collection',
   'asset_array',
 ]);
-const BUILTIN_NODE_OUTPUTS: Record<string, string[]> = {
+const BUILTIN_NODE_OUTPUTS: Readonly<Record<string, readonly string[]>> = {
+  'text.value': ['text'],
+  'integer.value': ['value'],
+  'number.value': ['value'],
+  'boolean.value': ['value'],
+  'json.value': ['value'],
+  'seed.value': ['seed'],
+  'choice.value': ['value'],
+  'text.join': ['text'],
+  'text.template': ['text'],
+  'text.enhance': ['text'],
+  'image.describe': ['text'],
   'image.train-lora': ['adapter'],
   'image.generate': ['image'],
   'video.generate': ['video'],
@@ -75,6 +86,26 @@ const BUNDLE_DOCUMENT_VALUES = {
 const MAX_ARTIFACT_PART_BYTES = 16 * 1024 * 1024;
 const MAX_ARTIFACT_PARTS = 16_384;
 
+function jsonValuesEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => jsonValuesEqual(value, right[index]));
+  }
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key) => (
+      Object.prototype.hasOwnProperty.call(rightRecord, key)
+      && jsonValuesEqual(leftRecord[key], rightRecord[key])
+    ));
+}
+
 function decodeBundleDocuments(body: SubmitGraphJobRequest): Record<string, Uint8Array> | null {
   if (!body.bundle_documents) return null;
   const documents: Record<string, Uint8Array> = {};
@@ -85,7 +116,7 @@ function decodeBundleDocuments(body: SubmitGraphJobRequest): Record<string, Uint
       const binary = atob(encoded);
       const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
       const parsed = parseJson(new TextDecoder().decode(bytes), unknownJsonSchema);
-      if (JSON.stringify(parsed) !== JSON.stringify(body[valueKey])) return null;
+      if (!jsonValuesEqual(parsed, body[valueKey])) return null;
       documents[path] = bytes;
     }
   } catch {
