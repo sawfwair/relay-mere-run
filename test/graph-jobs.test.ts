@@ -199,6 +199,8 @@ const BUILTIN_NODE_OUTPUT_CASES = [
   ['text.template', 'text'],
   ['text.enhance', 'text'],
   ['image.describe', 'text'],
+  ['vision.ground', 'image'],
+  ['vision.ground', 'detections'],
   ['image.train-lora', 'adapter'],
   ['image.generate', 'image'],
   ['video.generate', 'video'],

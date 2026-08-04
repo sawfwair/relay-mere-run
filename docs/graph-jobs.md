@@ -135,6 +135,11 @@ dependency shape without duplicating provider output catalogs; the assigned
 worker performs the authoritative typed graph validation from the pinned
 provider catalog.
 
+The built-in `vision.ground` contract admits Falcon Perception candidate
+geometry as two typed outputs: an annotated image and detections JSON. These are
+transported as ordinary verified graph artifacts; Relay does not reinterpret
+candidate detections as evidence or findings.
+
 Artifacts up to 8 MiB use one verified upload. Larger artifacts are split into
 8 MiB parts; each part carries its own size and SHA-256 and is rejected before
 storage if either differs. The relay records complete content by the artifact's
