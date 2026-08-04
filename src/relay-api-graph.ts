@@ -71,6 +71,7 @@ const BUILTIN_NODE_OUTPUTS: Readonly<Record<string, readonly string[]>> = {
   'text.template': ['text'],
   'text.enhance': ['text'],
   'image.describe': ['text'],
+  'vision.ground': ['image', 'detections'],
   'image.train-lora': ['adapter'],
   'image.generate': ['image'],
   'video.generate': ['video'],
