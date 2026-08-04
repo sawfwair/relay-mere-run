@@ -1,6 +1,7 @@
 import { env as testEnv, runDurableObjectAlarm, runInDurableObject, SELF } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 import { handleClientApi } from '../src/client-api';
+import { validateCreateRequest } from '../src/relay-api-graph';
 import type {
   AgentCapabilities,
   Env,
@@ -176,7 +177,58 @@ function encodeBundleDocument(value: unknown): string {
   return btoa(typeof value === 'string' ? value : JSON.stringify(value));
 }
 
+function sortJsonKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJsonKeys);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, sortJsonKeys(entry)]),
+  );
+}
+
+const BUILTIN_NODE_OUTPUT_CASES = [
+  ['text.value', 'text'],
+  ['integer.value', 'value'],
+  ['number.value', 'value'],
+  ['boolean.value', 'value'],
+  ['json.value', 'value'],
+  ['seed.value', 'seed'],
+  ['choice.value', 'value'],
+  ['text.join', 'text'],
+  ['text.template', 'text'],
+  ['text.enhance', 'text'],
+  ['image.describe', 'text'],
+  ['image.train-lora', 'adapter'],
+  ['image.generate', 'image'],
+  ['video.generate', 'video'],
+] as const;
+
 describe('portable graph jobs', () => {
+  it.each(BUILTIN_NODE_OUTPUT_CASES)(
+    'accepts the current mere.run built-in contract for %s',
+    async (kind, output) => {
+      const fixture = await graphFixture(new Uint8Array([1]));
+      fixture.body.graph = {
+        schema_version: 1,
+        kind: 'mere.run/workflow-graph',
+        name: `builtin-${kind.replace('.', '-')}`,
+        inputs: {},
+        nodes: [{ id: 'builtin', kind, arguments: {} }],
+        outputs: { result: { $ref: `nodes.builtin.outputs.${output}` } },
+      };
+      fixture.body.inputs = {};
+      fixture.body.assets.groups = [];
+      fixture.body.job.requirements.node_kinds = [kind];
+      fixture.body.job.outputs = [{
+        name: 'result',
+        reference: `nodes.builtin.outputs.${output}`,
+      }];
+
+      expect(validateCreateRequest(fixture.body)).toBeNull();
+    },
+  );
+
   it('surfaces the live node catalog through account-scoped fleet capabilities', async () => {
     const userId = `graph-catalog-${crypto.randomUUID()}`;
     const { ws } = await connectAgent(userId, graphCapabilities([]), { deviceId: 'catalog-node' });
@@ -721,6 +773,60 @@ describe('portable graph jobs', () => {
 
       expect(delivered.status).toBe(200);
       expect(await delivered.text()).toContain(`"seed":${exactSeed}`);
+    } finally {
+      closeWebSocket(ws);
+    }
+  });
+
+  it('accepts canonical bundle documents independent of object key order', async () => {
+    const userId = `graph-bundle-order-${crypto.randomUUID()}`;
+    const { relay, ws } = await connectAgent(userId, graphCapabilities(['image-klein-9b']));
+    const fixture = await graphFixture(new Uint8Array([1]));
+    makeAssetless(fixture.body);
+    fixture.body.bundle_documents = {
+      'job.json': encodeBundleDocument(sortJsonKeys(fixture.body.job)),
+      'graph.json': encodeBundleDocument(sortJsonKeys(fixture.body.graph)),
+      'inputs.json': encodeBundleDocument(sortJsonKeys(fixture.body.inputs)),
+      'assets.json': encodeBundleDocument(sortJsonKeys(fixture.body.assets)),
+    };
+
+    try {
+      const create = await relay.fetch(new Request('https://relay/internal/graph-jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+        body: JSON.stringify(fixture.body),
+      }));
+
+      expect(create.status).toBe(201);
+    } finally {
+      closeWebSocket(ws);
+    }
+  });
+
+  it('rejects bundle documents whose semantic contents differ from the request', async () => {
+    const userId = `graph-bundle-tamper-${crypto.randomUUID()}`;
+    const { relay, ws } = await connectAgent(userId, graphCapabilities(['image-klein-9b']));
+    const fixture = await graphFixture(new Uint8Array([1]));
+    makeAssetless(fixture.body);
+    fixture.body.bundle_documents = {
+      'job.json': encodeBundleDocument(sortJsonKeys(fixture.body.job)),
+      'graph.json': encodeBundleDocument(sortJsonKeys({
+        ...fixture.body.graph,
+        name: 'tampered-graph-name',
+      })),
+      'inputs.json': encodeBundleDocument(sortJsonKeys(fixture.body.inputs)),
+      'assets.json': encodeBundleDocument(sortJsonKeys(fixture.body.assets)),
+    };
+
+    try {
+      const create = await relay.fetch(new Request('https://relay/internal/graph-jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+        body: JSON.stringify(fixture.body),
+      }));
+
+      expect(create.status).toBe(400);
+      expect(await readJson(create)).toEqual({ error: 'invalid bundle documents' });
     } finally {
       closeWebSocket(ws);
     }
