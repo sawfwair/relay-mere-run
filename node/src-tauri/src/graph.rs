@@ -141,6 +141,10 @@ async fn execute_with_runtime(
 
     let execution_started = Instant::now();
     let mut child = Command::new(binary)
+        // External graph providers that delegate native inference must invoke
+        // the same selected runtime as the worker, not an older `mere.run`
+        // wrapper that happens to appear first on PATH.
+        .env("MERE_RUN_EXECUTABLE", binary)
         .args(["graph", "worker", "execute", "--bundle"])
         .arg(&bundle_directory)
         .arg("--run-dir")
@@ -1135,6 +1139,10 @@ mod tests {
         let artifact_sha256 = format_digest(Sha256::digest(artifact_bytes).as_slice());
         let script = format!(
             r#"#!/bin/sh
+if [ "$MERE_RUN_EXECUTABLE" != "$0" ]; then
+  printf '%s\n' 'worker did not export its selected runtime' >&2
+  exit 91
+fi
 run_dir=""
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--run-dir" ]; then

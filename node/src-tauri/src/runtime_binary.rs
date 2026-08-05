@@ -407,6 +407,13 @@ pub async fn resolution(refresh: bool) -> RuntimeBinaryResolution {
 }
 
 pub async fn selected_binary() -> PathBuf {
+    // An explicit pin is authoritative for execution. Runtime inspection still
+    // probes every trusted candidate when the UI requests `resolution()`, but a
+    // graph or model command must not spend its capability deadline auditing
+    // binaries that cannot override the pin.
+    if let Some(path) = configured_binary() {
+        return path;
+    }
     resolution(false)
         .await
         .selected_path
