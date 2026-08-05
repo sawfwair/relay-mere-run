@@ -40,6 +40,8 @@ type ActiveAsrJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type ActiveOcrJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type ActiveToolJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 
+const GRAPH_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn send_graph_completion(
     active: &ActiveGraphJobs,
     out: &mpsc::UnboundedSender<Message>,
@@ -63,14 +65,20 @@ struct NodeInventory {
 
 async fn collect_inventory(configured_models: &[String]) -> NodeInventory {
     let fallback = fallback_inventory(configured_models);
-    let (
-        capability_models,
-        plugin_capabilities,
-        runtime_inventory,
-        system,
-        graph_worker,
-        asr_streaming,
-    ) = tokio::join!(
+    // Resolve automatic runtime selection before starting any capability
+    // deadline. With an explicit MERERUN_BIN pin this is immediate; without a
+    // pin it performs the bounded compatibility scan once and caches the result.
+    let _ = mererun::resolve_mere_run_binary().await;
+    // The graph probe runs both `graph worker probe` and `graph catalog`. Running
+    // it beside the status/model probes below makes several mere.run processes
+    // contend for the same model inventory and can push the graph probe over its
+    // deadline. Probe the scheduling contract first so a slow inventory refresh
+    // cannot silently erase an otherwise healthy node's graph eligibility.
+    let graph_worker = tokio::time::timeout(GRAPH_PROBE_TIMEOUT, graph::probe())
+        .await
+        .ok()
+        .flatten();
+    let (capability_models, plugin_capabilities, runtime_inventory, system, asr_streaming) = tokio::join!(
         tokio::time::timeout(
             Duration::from_secs(12),
             mererun::capability_models(configured_models)
@@ -78,7 +86,6 @@ async fn collect_inventory(configured_models: &[String]) -> NodeInventory {
         tokio::time::timeout(Duration::from_secs(8), plugins::discover_plugins()),
         tokio::time::timeout(Duration::from_secs(20), mererun::runtime_inventory()),
         tokio::time::timeout(Duration::from_secs(10), hardware::collect_system_info()),
-        tokio::time::timeout(Duration::from_secs(20), graph::probe()),
         tokio::time::timeout(
             Duration::from_secs(20),
             mererun::asr_streaming_capabilities()
@@ -96,7 +103,7 @@ async fn collect_inventory(configured_models: &[String]) -> NodeInventory {
             diagnostic: inventory.diagnostic,
         }),
         system.ok(),
-        graph_worker.ok().flatten(),
+        graph_worker,
         asr_streaming.ok().flatten(),
     )
 }
@@ -1959,7 +1966,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires installed mere.run and companion plugins"]
-    async fn live_inventory_probe_reports_companion_plugins() {
+    async fn live_inventory_probe_reports_graph_worker_and_companion_plugins() {
         let started = Instant::now();
         let inventory = collect_inventory(&[]).await;
         let names = inventory
@@ -1977,6 +1984,14 @@ mod tests {
         assert!(names.contains(&"mere-animatic-tools"));
         assert!(names.contains(&"mere-vfx-tools"));
         assert!(names.contains(&"mere-run-subject-video"));
+        let graph_worker = inventory
+            .capabilities
+            .graph_worker
+            .expect("live inventory dropped the graph worker contract");
+        assert!(graph_worker
+            .contract_versions
+            .iter()
+            .any(|version| version == "mere.run/job-bundle.v1"));
     }
 
     #[tokio::test]
