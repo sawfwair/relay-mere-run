@@ -40,10 +40,11 @@ The Rust core (`src-tauri/src/`) is the relay device agent:
   Live ASR advertises only installed Parakeet and Qwen backends. Relay resolves
   automatic stream tickets to a ready backend before audio starts, while
   explicit requests remain pinned through the Node protocol and child command.
-- `plugins.rs` — scans `PATH`, `~/.local/bin`, `~/bin`, `/opt/homebrew/bin`, and
-  `/usr/local/bin` for `mere-*` executables that answer `manifest --json`,
-  advertises their commands in relay capabilities, runs assigned tool requests,
-  and uploads every artifact listed in the plugin run manifest.
+- `plugins.rs` — discovers the managed companion packs on `PATH` plus exact
+  operator-approved executables in the private plugin registry, probes
+  `manifest --json`, advertises their commands in relay capabilities, runs
+  assigned tool requests, and uploads every artifact listed in the plugin run
+  manifest.
 - `native_video.rs` — provides the built-in, typed `preview_subject_masks`,
   `prepare_subject_masks`, and `generate_subject_video` Relay tools. These call
   the installed native Swift/MLX `mere.run` commands directly; no companion
@@ -122,6 +123,22 @@ During development, point the node at a checkout-built executable:
 export MERE_ANIMATIC_TOOLS_BIN=/path/to/mere-animatic-tools
 export MERE_VFX_TOOLS_BIN=/path/to/mere-vfx-tools
 ```
+
+Private or application-owned companions stay outside this public repository.
+Opt one in by writing its exact absolute executable path to
+`~/.config/mere.run/node-plugins.json`:
+
+```json
+{
+  "executables": ["/absolute/path/to/mere-private-capability"]
+}
+```
+
+Set `MERERUN_NODE_PLUGIN_REGISTRY` to use a different registry file. The node
+does not scan for arbitrary private companions: unlisted binaries, relative
+paths, missing files, and invalid registries are ignored. A registered
+executable must use the same filename as the `name` in its `manifest --json`
+response so inventory and tool dispatch resolve the same binary.
 
 When `mere-animatic-tools` is available, the node advertises all ten Animatic
 production commands to the relay. Animatic's Run Node panel then enables the

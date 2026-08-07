@@ -13,6 +13,7 @@ use tokio::sync::watch;
 use crate::protocol::{PluginCapability, ToolArtifact, ToolRequest};
 
 const NODE_EXECUTABLE_NAMES: &[&str] = &["mere.run-node", "mere-run-node"];
+const PRIVATE_PLUGIN_REGISTRY_ENV: &str = "MERERUN_NODE_PLUGIN_REGISTRY";
 
 struct ManagedCapabilityPack {
     id: &'static str,
@@ -139,6 +140,12 @@ struct PluginManifest {
     capabilities: Vec<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct PrivatePluginRegistry {
+    #[serde(default)]
+    executables: Vec<PathBuf>,
+}
+
 #[derive(Debug, Deserialize)]
 struct PluginDoctor {
     #[serde(default)]
@@ -196,13 +203,62 @@ fn path_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+fn private_plugin_registry_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(PRIVATE_PLUGIN_REGISTRY_ENV) {
+        let path = PathBuf::from(path);
+        if !path.as_os_str().is_empty() {
+            return Some(path);
+        }
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".config/mere.run/node-plugins.json"))
+}
+
+fn private_plugin_paths_from(bytes: &[u8]) -> Vec<PathBuf> {
+    serde_json::from_slice::<PrivatePluginRegistry>(bytes)
+        .unwrap_or_default()
+        .executables
+        .into_iter()
+        .filter(|path| path.is_absolute())
+        .collect()
+}
+
+pub(crate) fn private_plugin_paths() -> Vec<PathBuf> {
+    let Some(path) = private_plugin_registry_path() else {
+        return Vec::new();
+    };
+    std::fs::read(path)
+        .map(|bytes| private_plugin_paths_from(&bytes))
+        .unwrap_or_default()
+}
+
 fn executable_candidates_in(
     dirs: impl IntoIterator<Item = PathBuf>,
+    private_plugins: impl IntoIterator<Item = PathBuf>,
     current_executable: Option<&Path>,
 ) -> Vec<PathBuf> {
     let mut seen = BTreeSet::new();
     let mut candidates = Vec::new();
     let current_executable = current_executable.and_then(|path| path.canonicalize().ok());
+
+    for path in private_plugins {
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !path.is_absolute() || NODE_EXECUTABLE_NAMES.contains(&name) || !path.is_file() {
+            continue;
+        }
+        if current_executable.as_ref().is_some_and(|current| {
+            path.canonicalize()
+                .is_ok_and(|candidate| candidate == *current)
+        }) {
+            continue;
+        }
+        if seen.insert(name.to_string()) {
+            candidates.push(path);
+        }
+    }
 
     for dir in dirs {
         let Ok(read_dir) = std::fs::read_dir(&dir) else {
@@ -238,10 +294,14 @@ fn executable_candidates_in(
 
 fn executable_candidates() -> Vec<PathBuf> {
     let current_executable = std::env::current_exe().ok();
-    executable_candidates_in(path_dirs(), current_executable.as_deref())
+    executable_candidates_in(
+        path_dirs(),
+        private_plugin_paths(),
+        current_executable.as_deref(),
+    )
 }
 
-async fn manifest_for(path: &Path) -> Option<PluginCapability> {
+pub(crate) async fn manifest_for(path: &Path) -> Option<PluginCapability> {
     let output = tokio::time::timeout(
         Duration::from_secs(3),
         Command::new(path)
@@ -1091,9 +1151,32 @@ mod tests {
         }
 
         assert_eq!(
-            executable_candidates_in([root.clone()], Some(&renamed_node)),
+            executable_candidates_in([root.clone()], Vec::<PathBuf>::new(), Some(&renamed_node)),
             vec![plugin]
         );
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn private_plugin_registry_is_explicit_and_fail_closed() {
+        let root = test_root();
+        std::fs::create_dir_all(&root).expect("plugin directory");
+        let private_plugin = root.join("mere-private-capability");
+        let unrelated = root.join("mere-unregistered-capability");
+        std::fs::write(&private_plugin, b"test").expect("private plugin");
+        std::fs::write(&unrelated, b"test").expect("unrelated plugin");
+
+        let registry = serde_json::to_vec(&serde_json::json!({
+            "executables": [private_plugin, "relative-plugin"]
+        }))
+        .expect("registry");
+        let configured = private_plugin_paths_from(&registry);
+        assert_eq!(
+            executable_candidates_in([root.clone()], configured, None),
+            vec![private_plugin]
+        );
+        assert!(private_plugin_paths_from(b"not-json").is_empty());
 
         std::fs::remove_dir_all(root).expect("cleanup");
     }

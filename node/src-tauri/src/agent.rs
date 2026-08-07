@@ -2120,6 +2120,20 @@ mod tests {
                 "wrong {name} command inventory"
             );
         }
+
+        let mut private_plugin_names = Vec::new();
+        for path in plugins::private_plugin_paths() {
+            if let Some(plugin) = plugins::manifest_for(&path).await {
+                private_plugin_names.push(plugin.name);
+            }
+        }
+        for name in &private_plugin_names {
+            assert!(
+                plugins.iter().any(|plugin| plugin["name"] == *name),
+                "registered private companion {name} was not advertised: {plugins:?}"
+            );
+        }
+        eprintln!("registered_private_plugins={private_plugin_names:?}");
     }
 
     /// Live end-to-end check of per-step job progress against the production
