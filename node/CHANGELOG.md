@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.2.17 - 2026-08-06
+
+- Discover exact operator-approved application companions from the private
+  Node plugin registry while continuing to ignore unlisted, relative, missing,
+  and invalid entries.
+
 ## 0.2.16 - 2026-08-03
 
 - Discover every trusted `mere.run` installation, select the newest binary
