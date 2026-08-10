@@ -45,6 +45,19 @@ export const submitChatRequestSchema = z.object({
   temperature: z.number().optional(),
   requires_json: z.boolean().optional(),
   use_lora: z.boolean().optional(),
+  adapter: z.object({
+    manifest_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    base_model_id: z.string().min(1),
+    scale: z.number().positive().max(4).optional(),
+  }).passthrough().optional(),
+  required_device_id: z.string().min(1).max(160).optional(),
+  execution_spec_sha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  identity: z.object({
+    persona_id: z.string().min(1),
+    version_id: z.string().min(1),
+    deployment_id: z.string().min(1),
+  }).passthrough().optional(),
+  idempotency_key: z.string().min(1).max(160).regex(/^[A-Za-z0-9_.:-]+$/u).optional(),
   model: z.string().optional(),
 }).passthrough() satisfies z.ZodType<SubmitChatRequest>;
 

@@ -41,6 +41,7 @@ const workflowRequirementsSchema = z.object({
   minimum_disk_bytes: z.number().optional(),
   minimum_cpu_cores: z.number().optional(),
   network_access: z.boolean().optional(),
+  required_device_id: z.string().min(1).max(160).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u).optional(),
 }).passthrough();
 
 export const workflowJobManifestSchema = z.object({
@@ -51,6 +52,14 @@ export const workflowJobManifestSchema = z.object({
   input_fingerprint: z.string(),
   requirements: workflowRequirementsSchema,
   outputs: z.array(z.object({ name: z.string(), reference: z.string() }).passthrough()),
+  execution_spec_sha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  identity: z.object({
+    persona_id: z.string().min(1),
+    version_id: z.string().min(1),
+    deployment_id: z.string().min(1),
+  }).passthrough().optional(),
+  idempotency_key: z.string().min(1).max(160).optional(),
+  webhook_url: z.string().url().max(2048).optional(),
 }).passthrough() satisfies z.ZodType<WorkflowJobManifest>;
 
 const workflowInputDefinitionSchema = z.object({

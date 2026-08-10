@@ -28,10 +28,16 @@ export interface AgentCapabilities {
   max_resolution: number;
   controlnet: boolean;
   lora: boolean;
+  text_adapters?: TextAdapterCapability[];
   img2img: boolean;
   plugins?: PluginCapability[];
   graph_worker?: GraphWorkerCapabilities;
   asr_streaming?: AsrStreamingCapabilities;
+}
+
+export interface TextAdapterCapability {
+  manifest_sha256: string;
+  base_model_id: string;
 }
 
 export interface AsrStreamingCapabilities {
@@ -495,6 +501,7 @@ export interface WorkflowJobRequirements {
   minimum_disk_bytes?: number;
   minimum_cpu_cores?: number;
   network_access?: boolean;
+  required_device_id?: string;
 }
 
 export interface WorkflowModelProvenance {
@@ -513,6 +520,10 @@ export interface WorkflowJobManifest {
   input_fingerprint: string;
   requirements: WorkflowJobRequirements;
   outputs: Array<{ name: string; reference: string }>;
+  execution_spec_sha256?: string;
+  identity?: IdentityExecutionReference;
+  idempotency_key?: string;
+  webhook_url?: string;
 }
 
 export interface WorkflowAssetEntry {
@@ -591,6 +602,11 @@ export interface GraphJob {
   max_attempts: number;
   node_token: string;
   relay_origin: string;
+  execution_receipt?: RelayExecutionReceipt;
+  request_sha256?: string;
+  assigned_device_id?: string;
+  webhook_url?: string | null;
+  webhook_sent?: boolean;
 }
 
 export interface GraphExecutionMetrics {
@@ -920,6 +936,7 @@ export type RelayMessage =
   | ModelPlanRequestMessage
   | ModelPlanCancelMessage
   | ChatRequestMessage
+  | ChatCancelMessage
   | TalkRequestMessage
   | AsrRequestMessage
   | EmbedRequestMessage
@@ -1042,17 +1059,54 @@ export interface ChatMessage {
   image_url?: string;
 }
 
+export interface TextAdapterReference {
+  manifest_sha256: string;
+  base_model_id: string;
+  scale?: number;
+}
+
+export interface IdentityExecutionReference {
+  persona_id: string;
+  version_id: string;
+  deployment_id: string;
+}
+
+export interface RelayExecutionReceipt {
+  schema: 'relay.execution-receipt.v1';
+  execution_id: string;
+  request_sha256: string;
+  execution_spec_sha256?: string;
+  model_id: string;
+  adapter_manifest_sha256?: string;
+  provider_id: string;
+  provider_version?: string;
+  provider_catalog_sha256?: string;
+  device_id?: string;
+  started_at: string | null;
+  completed_at: string;
+  duration_ms?: number;
+  state: 'complete' | 'failed' | 'cancelled';
+  output_sha256?: string;
+  error_code?: string;
+}
+
 export interface Chat {
   chat_id: string;
   user_id: string;
   client_id: string;
   agent_id: string | null;
-  status: 'queued' | 'processing' | 'complete' | 'failed';
+  status: 'queued' | 'processing' | 'complete' | 'failed' | 'cancelled';
   messages: ChatMessage[];
   max_tokens?: number;
   temperature?: number;
   requires_json?: boolean;
   use_lora?: boolean;
+  adapter?: TextAdapterReference;
+  required_device_id?: string;
+  execution_spec_sha256?: string;
+  identity?: IdentityExecutionReference;
+  idempotency_key?: string;
+  request_sha256: string;
   model?: string;
   response: string | null;
   tokens_generated: number | null;
@@ -1060,6 +1114,7 @@ export interface Chat {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  execution_receipt: RelayExecutionReceipt | null;
 }
 
 // WebSocket messages: Relay → Agent (Chat)
@@ -1072,7 +1127,13 @@ export interface ChatRequestMessage {
   temperature?: number;
   requires_json?: boolean;
   use_lora?: boolean;
+  adapter?: TextAdapterReference;
   model?: string;
+}
+
+export interface ChatCancelMessage {
+  type: 'chat_cancel';
+  chat_id: string;
 }
 
 // WebSocket messages: Agent → Relay (Chat)
@@ -1096,12 +1157,17 @@ export interface SubmitChatRequest {
   temperature?: number;
   requires_json?: boolean;
   use_lora?: boolean;
+  adapter?: TextAdapterReference;
+  required_device_id?: string;
+  execution_spec_sha256?: string;
+  identity?: IdentityExecutionReference;
+  idempotency_key?: string;
   model?: string;
 }
 
 export interface SubmitChatResponse {
   chat_id: string;
-  status: 'assigned' | 'queued';
+  status: 'assigned' | 'queued' | 'complete' | 'failed' | 'cancelled';
   agent_id?: string;
   position?: number;
 }
@@ -1119,6 +1185,7 @@ export interface ChatStatusResponse {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  execution_receipt: RelayExecutionReceipt | null;
 }
 
 // MARK: - Talk/TTS Types

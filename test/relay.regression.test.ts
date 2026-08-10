@@ -556,7 +556,10 @@ describe('relay regressions', () => {
       });
 
       expect(stored.first?.status).toBe('processing');
+      expect(stored.first?.messages).toEqual([]);
+      expect(stored.first?.response).toBeNull();
       expect(stored.second?.status).toBe('queued');
+      expect(stored.second?.messages).toEqual([{ role: 'user', content: 'second chat' }]);
     } finally {
       closeWebSocket(ws);
     }
@@ -582,8 +585,27 @@ describe('relay regressions', () => {
         const status = await readJson<JsonRecord>(await relay.fetch(new Request(
           `https://relay/internal/chat/${completedId}`
         )));
-        expect(status).toMatchObject({ status: 'complete', response: 'done', tokens_generated: 3 });
+        expect(status).toMatchObject({
+          status: 'complete',
+          response: 'done',
+          tokens_generated: 3,
+          execution_receipt: {
+            schema: 'relay.execution-receipt.v1',
+            execution_id: completedId,
+            model_id: 'text',
+            provider_id: 'mere.run',
+            state: 'complete',
+          },
+        });
+        expect((status.execution_receipt as JsonRecord).request_sha256).toMatch(/^[a-f0-9]{64}$/u);
+        expect((status.execution_receipt as JsonRecord).output_sha256)
+          .toBe('a4c3ed04a95a3da14a9d235c83d868bed7c0f45cf7f3faa751ee8f50598d2211');
       });
+      const completedStored = await runInDurableObject(relay, async (_instance, state) =>
+        state.storage.get<JsonRecord>(`chat:${completedId}`)
+      );
+      expect(completedStored?.messages).toEqual([]);
+      expect(completedStored?.response).toBeNull();
 
       const failedSubmit = await readJson<JsonRecord>(await submitChat(relay, userId, {
         messages: [{ role: 'user', content: 'fail this chat' }],
@@ -596,10 +618,246 @@ describe('relay regressions', () => {
         const status = await readJson<JsonRecord>(await relay.fetch(new Request(
           `https://relay/internal/chat/${failedId}`
         )));
-        expect(status).toMatchObject({ status: 'failed', error: 'synthetic failure' });
+        expect(status).toMatchObject({
+          status: 'failed',
+          error: 'EXECUTION_FAILED',
+          execution_receipt: {
+            schema: 'relay.execution-receipt.v1',
+            execution_id: failedId,
+            state: 'failed',
+            error_code: 'EXECUTION_FAILED',
+          },
+        });
       });
     } finally {
       closeWebSocket(ws);
+    }
+  });
+
+  it('redacts durable chat content and emits a receipt when its node disconnects', async () => {
+    const userId = newUserId('chat-disconnect');
+    const { relay, ws } = await connectAgent(userId, capabilitiesWithModels(['text']));
+    const submitted = await readJson<JsonRecord>(await submitChat(relay, userId, {
+      messages: [{ role: 'user', content: 'private content must not survive disconnect' }],
+      model: 'text',
+      execution_spec_sha256: 'd'.repeat(64),
+    }));
+    const chatId = String(submitted.chat_id);
+    await waitForWebSocketJson<JsonRecord>(ws);
+    closeWebSocket(ws);
+
+    await vi.waitFor(async () => {
+      const status = await readJson<JsonRecord>(await relay.fetch(new Request(
+        `https://relay/internal/chat/${chatId}`
+      )));
+      expect(status).toMatchObject({
+        status: 'failed',
+        execution_receipt: {
+          schema: 'relay.execution-receipt.v1',
+          execution_id: chatId,
+          execution_spec_sha256: 'd'.repeat(64),
+          state: 'failed',
+          error_code: 'EXECUTION_FAILED',
+        },
+      });
+    });
+
+    const stored = await runInDurableObject(relay, async (_instance, state) =>
+      state.storage.get<JsonRecord>(`chat:${chatId}`)
+    );
+    expect(stored?.messages).toEqual([]);
+    expect(stored?.response).toBeNull();
+    expect(JSON.stringify(stored)).not.toContain('private content must not survive disconnect');
+  });
+
+  it('cancels chat execution, emits a sanitized receipt, and ignores late node output', async () => {
+    const userId = newUserId('chat-cancel');
+    const { relay, ws } = await connectAgent(userId, capabilitiesWithModels(['text']));
+    try {
+      const submitted = await readJson<JsonRecord>(await submitChat(relay, userId, {
+        messages: [{ role: 'user', content: 'cancel this private prompt' }],
+        model: 'text',
+        execution_spec_sha256: 'c'.repeat(64),
+      }));
+      const chatId = String(submitted.chat_id);
+      await waitForWebSocketJson<JsonRecord>(ws);
+      const cancelled = await relay.fetch(new Request(
+        `https://relay/internal/chat/${chatId}`,
+        { method: 'POST' }
+      ));
+      expect(cancelled.status).toBe(200);
+      expect(await readJson(cancelled)).toEqual({ cancelled: true });
+      expect(await waitForWebSocketJson<JsonRecord>(ws)).toEqual({
+        type: 'chat_cancel',
+        chat_id: chatId,
+      });
+
+      let status = await readJson<JsonRecord>(await relay.fetch(new Request(
+        `https://relay/internal/chat/${chatId}`
+      )));
+      expect(status).toMatchObject({
+        status: 'cancelled',
+        response: null,
+        execution_receipt: {
+          schema: 'relay.execution-receipt.v1',
+          execution_id: chatId,
+          execution_spec_sha256: 'c'.repeat(64),
+          state: 'cancelled',
+          error_code: 'EXECUTION_CANCELLED',
+        },
+      });
+
+      ws.send(JSON.stringify({
+        type: 'chat_response',
+        chat_id: chatId,
+        response: 'must not replace cancelled state',
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      status = await readJson<JsonRecord>(await relay.fetch(new Request(
+        `https://relay/internal/chat/${chatId}`
+      )));
+      expect(status.status).toBe('cancelled');
+      expect(status.response).toBeNull();
+
+      const stored = await runInDurableObject(relay, async (_instance, state) =>
+        state.storage.get<JsonRecord>(`chat:${chatId}`)
+      );
+      expect(stored?.messages).toEqual([]);
+      expect(stored?.response).toBeNull();
+      expect(JSON.stringify(stored)).not.toContain('cancel this private prompt');
+    } finally {
+      closeWebSocket(ws);
+    }
+  });
+
+  it('requires the exact requested model for immutable execution specs', async () => {
+    const userId = newUserId('chat-exact-model');
+    const { relay, ws } = await connectAgent(userId, capabilitiesWithModels(['text']));
+    try {
+      const pinned = await submitChat(relay, userId, {
+        messages: [{ role: 'user', content: 'use the pinned model' }],
+        model: 'text-chat-laguna-xs-2-1',
+        execution_spec_sha256: 'e'.repeat(64),
+      });
+      expect(pinned.status).toBe(503);
+      expect(await readJson(pinned)).toMatchObject({
+        code: 'NO_COMPATIBLE_AGENTS',
+      });
+
+      const legacy = await submitChat(relay, userId, {
+        messages: [{ role: 'user', content: 'legacy generic text routing' }],
+        model: 'text-chat-laguna-xs-2-1',
+      });
+      expect(legacy.status).toBe(200);
+      expect(await readJson(legacy)).toMatchObject({ status: 'assigned' });
+      expect(await waitForWebSocketJson<JsonRecord>(ws)).toMatchObject({
+        type: 'chat_request',
+        model: 'text-chat-laguna-xs-2-1',
+      });
+    } finally {
+      closeWebSocket(ws);
+    }
+  });
+
+  it('requires exact adapters, routes them to their owning node, and deduplicates retries', async () => {
+    const userId = newUserId('chat-adapter');
+    const manifestSha256 = 'a'.repeat(64);
+    const executionSpecSha256 = 'b'.repeat(64);
+    const baseModelId = 'text-chat-gemma4-turbo';
+    const adapterCapabilities = {
+      ...capabilitiesWithModels([baseModelId]),
+      text_adapters: [{ manifest_sha256: manifestSha256, base_model_id: baseModelId }],
+    };
+    const unowned = await connectAgent(userId, capabilitiesWithModels([baseModelId]), {
+      deviceId: 'general-text-node',
+    });
+    const owned = await connectAgent(userId, adapterCapabilities, {
+      deviceId: 'identity-adapter-node',
+    });
+    try {
+      const missingAdapter = await submitChat(owned.relay, userId, {
+        messages: [{ role: 'user', content: 'do not silently drop the adapter' }],
+        model: baseModelId,
+        use_lora: true,
+      });
+      expect(missingAdapter.status).toBe(400);
+      expect(await readJson(missingAdapter)).toMatchObject({ code: 'ADAPTER_REFERENCE_REQUIRED' });
+
+      const wrongBaseModel = await submitChat(owned.relay, userId, {
+        messages: [{ role: 'user', content: 'reject an incompatible base model' }],
+        model: 'text-chat-other-model',
+        adapter: {
+          manifest_sha256: manifestSha256,
+          base_model_id: baseModelId,
+        },
+      });
+      expect(wrongBaseModel.status).toBe(400);
+      expect(await readJson(wrongBaseModel)).toMatchObject({ code: 'ADAPTER_BASE_MODEL_MISMATCH' });
+
+      const request = {
+        messages: [{ role: 'user' as const, content: 'answer as the pinned identity' }],
+        model: baseModelId,
+        adapter: {
+          manifest_sha256: manifestSha256,
+          base_model_id: baseModelId,
+          scale: 0.75,
+        },
+        required_device_id: 'identity-adapter-node',
+        execution_spec_sha256: executionSpecSha256,
+        identity: {
+          persona_id: 'persona_ada',
+          version_id: 'version_1',
+          deployment_id: 'deployment_1',
+        },
+        idempotency_key: 'consumer-run-1-member-ada',
+      };
+      const first = await submitChat(owned.relay, userId, request);
+      expect(first.status).toBe(200);
+      const firstBody = await readJson<JsonRecord>(first);
+      expect(firstBody.status).toBe('assigned');
+
+      const assigned = await waitForWebSocketJson<JsonRecord>(owned.ws);
+      expect(assigned).toMatchObject({
+        type: 'chat_request',
+        chat_id: firstBody.chat_id,
+        model: baseModelId,
+        adapter: request.adapter,
+      });
+
+      const repeated = await submitChat(owned.relay, userId, request);
+      expect(repeated.status).toBe(200);
+      expect(await readJson(repeated)).toMatchObject({
+        chat_id: firstBody.chat_id,
+        status: 'assigned',
+      });
+
+      const conflict = await submitChat(owned.relay, userId, {
+        ...request,
+        messages: [{ role: 'user', content: 'a different request under the same key' }],
+      });
+      expect(conflict.status).toBe(409);
+      expect(await readJson(conflict)).toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+
+      owned.ws.send(JSON.stringify({
+        type: 'chat_response',
+        chat_id: firstBody.chat_id,
+        response: 'pinned response',
+      }));
+      await vi.waitFor(async () => {
+        const status = await readJson<JsonRecord>(await owned.relay.fetch(new Request(
+          `https://relay/internal/chat/${String(firstBody.chat_id)}`
+        )));
+        expect(status.execution_receipt).toMatchObject({
+          execution_spec_sha256: executionSpecSha256,
+          adapter_manifest_sha256: manifestSha256,
+          device_id: 'identity-adapter-node',
+          model_id: baseModelId,
+          state: 'complete',
+        });
+      });
+    } finally {
+      closeWebSocket(unowned.ws);
+      closeWebSocket(owned.ws);
     }
   });
 

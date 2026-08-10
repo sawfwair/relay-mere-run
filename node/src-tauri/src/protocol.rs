@@ -14,6 +14,8 @@ pub struct AgentCapabilities {
     pub max_resolution: u32,
     pub controlnet: bool,
     pub lora: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub text_adapters: Vec<TextAdapterCapability>,
     pub img2img: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginCapability>,
@@ -21,6 +23,12 @@ pub struct AgentCapabilities {
     pub graph_worker: Option<GraphWorkerCapabilities>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asr_streaming: Option<AsrStreamingCapabilities>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TextAdapterCapability {
+    pub manifest_sha256: String,
+    pub base_model_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -568,7 +576,17 @@ pub struct ChatRequest {
     #[serde(default)]
     pub use_lora: Option<bool>,
     #[serde(default)]
+    pub adapter: Option<TextAdapterReference>,
+    #[serde(default)]
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TextAdapterReference {
+    pub manifest_sha256: String,
+    pub base_model_id: String,
+    #[serde(default)]
+    pub scale: Option<f32>,
 }
 
 /// Speech synthesis request parameters (relay `TalkRequest`).
@@ -764,6 +782,9 @@ pub enum ServerMessage {
         #[serde(flatten)]
         request: ChatRequest,
     },
+    ChatCancel {
+        chat_id: String,
+    },
     AsrRequest {
         asr_id: String,
         #[serde(default)]
@@ -859,6 +880,7 @@ mod inventory_tests {
                 max_resolution: 2048,
                 controlnet: false,
                 lora: true,
+                text_adapters: vec![],
                 img2img: true,
                 plugins: vec![],
                 graph_worker: None,

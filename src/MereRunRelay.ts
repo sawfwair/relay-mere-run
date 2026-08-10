@@ -30,6 +30,7 @@ import {
   scheduleEmbedWebhookIfNeeded,
   scheduleJobWebhookIfNeeded,
   scheduleToolWebhookIfNeeded,
+  scheduleGraphWebhookIfNeeded,
 } from './relay-webhooks';
 import {
   acceptAsrBrowserWebSocket,
@@ -70,7 +71,7 @@ export class MereRunRelay extends DurableObject<Env> {
     let chat = this.chats.get(chatId);
     if (!chat) {
       chat = await this.ctx.storage.get<Chat>(`chat:${chatId}`);
-      if (chat && chat.status !== 'complete' && chat.status !== 'failed') {
+      if (chat && chat.status !== 'complete' && chat.status !== 'failed' && chat.status !== 'cancelled') {
         this.chats.set(chatId, chat);
       }
     }
@@ -79,7 +80,16 @@ export class MereRunRelay extends DurableObject<Env> {
 
   private async saveChat(chat: Chat): Promise<void> {
     this.chats.set(chat.chat_id, chat);
-    await this.ctx.storage.put(`chat:${chat.chat_id}`, chat);
+    await this.ctx.storage.put(`chat:${chat.chat_id}`, this.prepareChatForStorage(chat));
+  }
+
+  private prepareChatForStorage(chat: Chat): Chat {
+    if (chat.status === 'queued') return chat;
+    return {
+      ...chat,
+      messages: [],
+      response: null,
+    };
   }
 
   private async getTalk(talkId: string): Promise<Talk | undefined> {
@@ -269,6 +279,7 @@ export class MereRunRelay extends DurableObject<Env> {
       scheduleAsrWebhookIfNeeded: (asr: Asr) => scheduleAsrWebhookIfNeeded(relayContext, asr),
       scheduleEmbedWebhookIfNeeded: (embed: Embed) => scheduleEmbedWebhookIfNeeded(relayContext, embed),
       scheduleToolWebhookIfNeeded: (tool: Tool) => scheduleToolWebhookIfNeeded(relayContext, tool),
+      scheduleGraphWebhookIfNeeded: (graph: GraphJob) => scheduleGraphWebhookIfNeeded(relayContext, graph),
     };
 
     return relayContext;

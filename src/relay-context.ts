@@ -106,4 +106,5 @@ export interface RelayContext {
   scheduleAsrWebhookIfNeeded(asr: Asr): Promise<void>;
   scheduleEmbedWebhookIfNeeded(embed: Embed): Promise<void>;
   scheduleToolWebhookIfNeeded(tool: Tool): Promise<void>;
+  scheduleGraphWebhookIfNeeded(graph: GraphJob): Promise<void>;
 }

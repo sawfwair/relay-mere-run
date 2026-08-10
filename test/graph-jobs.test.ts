@@ -2,6 +2,9 @@ import { env as testEnv, runDurableObjectAlarm, runInDurableObject, SELF } from 
 import { describe, expect, it, vi } from 'vitest';
 import { handleClientApi } from '../src/client-api';
 import { validateCreateRequest } from '../src/relay-api-graph';
+import { buildGraphWebhookPayload } from '../src/relay-webhooks';
+import { graphArtifactKey } from '../src/relay-graph-storage';
+import type { RelayContext } from '../src/relay-context';
 import type {
   AgentCapabilities,
   Env,
@@ -231,6 +234,77 @@ describe('portable graph jobs', () => {
     },
   );
 
+  it('rejects graph webhook targets that are not public HTTPS origins', async () => {
+    const fixture = await graphFixture(new Uint8Array([1]));
+    fixture.body.job.webhook_url = 'http://127.0.0.1/internal';
+    expect(validateCreateRequest(fixture.body)).toBe(
+      'graph webhook_url must be a public HTTPS origin'
+    );
+    fixture.body.job.webhook_url = 'https://identity.example/hooks/relay';
+    expect(validateCreateRequest(fixture.body)).toBeNull();
+  });
+
+  it('embeds only verified sanitized receipt JSON in terminal graph webhooks', async () => {
+    const userId = `graph-webhook-receipt-${crypto.randomUUID()}`;
+    const jobId = crypto.randomUUID();
+    const receipt = {
+      schema: 'identity.provider-receipt.v1',
+      request_sha256: 'a'.repeat(64),
+      result_sha256: 'b'.repeat(64),
+      provider_catalog_sha256: 'c'.repeat(64),
+    };
+    const bytes = new TextEncoder().encode(JSON.stringify(receipt));
+    const digest = await sha256(bytes);
+    const artifact: GraphRunArtifact = {
+      name: 'receipt',
+      kind: 'graph.output',
+      path: 'outputs/receipt.json',
+      content_type: 'application/vnd.mere.identity-receipt+json',
+      size_bytes: bytes.byteLength,
+      sha256: digest,
+    };
+    await testEnv.IMAGES.put(graphArtifactKey(userId, jobId, 'receipt'), bytes, {
+      customMetadata: { sha256: digest },
+    });
+    const payload = await buildGraphWebhookPayload(
+      { env: testEnv } as unknown as RelayContext,
+      {
+        job_id: jobId,
+        user_id: userId,
+        state: 'finished',
+        artifacts: [artifact],
+        artifact_uploads: {},
+        run_manifest: { state: 'finished' },
+      } as unknown as GraphJob,
+    );
+    expect(payload).toMatchObject({
+      sanitized_outputs: {
+        receipt: {
+          artifact: { sha256: digest, size_bytes: bytes.byteLength },
+          value: receipt,
+        },
+      },
+    });
+
+    const unsafe = new TextEncoder().encode(JSON.stringify({ ...receipt, raw_prompt: 'private' }));
+    const unsafeDigest = await sha256(unsafe);
+    await testEnv.IMAGES.put(graphArtifactKey(userId, jobId, 'receipt'), unsafe, {
+      customMetadata: { sha256: unsafeDigest },
+    });
+    const unsafePayload = await buildGraphWebhookPayload(
+      { env: testEnv } as unknown as RelayContext,
+      {
+        job_id: jobId,
+        user_id: userId,
+        state: 'finished',
+        artifacts: [{ ...artifact, sha256: unsafeDigest, size_bytes: unsafe.byteLength }],
+        artifact_uploads: {},
+        run_manifest: { state: 'finished' },
+      } as unknown as GraphJob,
+    );
+    expect(unsafePayload).not.toHaveProperty('sanitized_outputs');
+  });
+
   it('surfaces the live node catalog through account-scoped fleet capabilities', async () => {
     const userId = `graph-catalog-${crypto.randomUUID()}`;
     const { ws } = await connectAgent(userId, graphCapabilities([]), { deviceId: 'catalog-node' });
@@ -322,6 +396,36 @@ describe('portable graph jobs', () => {
     } finally {
       closeWebSocket(uncached.ws);
       closeWebSocket(cached.ws);
+    }
+  });
+
+  it('deduplicates graph submissions by account-scoped idempotency key', async () => {
+    const userId = `graph-idempotency-${crypto.randomUUID()}`;
+    const { relay, ws } = await connectAgent(userId, graphCapabilities(['image-klein-9b']));
+    const first = await graphFixture(new Uint8Array([1]));
+    first.body.job.idempotency_key = 'identity:logical-job-1';
+    const repeated = structuredClone(first.body);
+    repeated.job.job_id = crypto.randomUUID();
+    try {
+      const submit = (body: SubmitGraphJobRequest) => relay.fetch(new Request(
+        'https://relay/internal/graph-jobs',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+          body: JSON.stringify(body),
+        }
+      ));
+      expect((await readJson<{ job_id: string }>(await submit(first.body))).job_id).toBe(first.jobId);
+      const duplicate = await submit(repeated);
+      expect(duplicate.status).toBe(200);
+      expect((await readJson<{ job_id: string }>(duplicate)).job_id).toBe(first.jobId);
+
+      repeated.job.input_fingerprint = 'c'.repeat(64);
+      const conflict = await submit(repeated);
+      expect(conflict.status).toBe(409);
+      await expect(readJson(conflict)).resolves.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+    } finally {
+      closeWebSocket(ws);
     }
   });
 
@@ -598,6 +702,7 @@ describe('portable graph jobs', () => {
         expect(status.artifacts).toEqual([artifact]);
         expect(status.metrics).toEqual(metrics);
       });
+      expect((await waitForWebSocketJson<{ type: string }>(ws)).type).toBe('inventory_request');
 
       const fetched = await relay.fetch(new Request(
         `https://relay/internal/graph-jobs/${fixture.jobId}/artifacts/adapter`
@@ -919,6 +1024,42 @@ describe('portable graph jobs', () => {
       });
     } finally {
       closeWebSocket(ws);
+    }
+  });
+
+  it('pins private graph artifacts to their owning Relay device', async () => {
+    const userId = `graph-device-pin-${crypto.randomUUID()}`;
+    const other = await connectAgent(userId, graphCapabilities(['image-klein-9b']), {
+      deviceId: 'other-graph-node',
+    });
+    const owner = await connectAgent(userId, graphCapabilities(['image-klein-9b']), {
+      deviceId: 'artifact-owner-node',
+    });
+    const fixture = await graphFixture(new Uint8Array([9, 9, 9]));
+    makeAssetless(fixture.body);
+    fixture.body.job.requirements.required_device_id = 'artifact-owner-node';
+    try {
+      const create = await owner.relay.fetch(new Request('https://relay/internal/graph-jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+        body: JSON.stringify(fixture.body),
+      }));
+      expect(create.status).toBe(201);
+      const commit = await readJson<{
+        agent_id: string | null;
+        placement: { nodes: Array<{ device_id: string; blockers: Array<{ code: string }> }> };
+      }>(await owner.relay.fetch(new Request(
+        `https://relay/internal/graph-jobs/${fixture.jobId}/commit`,
+        { method: 'POST' },
+      )));
+      expect(commit.agent_id).toBe(owner.agentId);
+      expect(commit.placement.nodes.find((node) => node.device_id === 'other-graph-node')?.blockers)
+        .toContainEqual(expect.objectContaining({ code: 'required_device_mismatch' }));
+      expect((await waitForWebSocketJson<{ type: string; job_id: string }>(owner.ws)))
+        .toMatchObject({ type: 'graph_request', job_id: fixture.jobId });
+    } finally {
+      closeWebSocket(other.ws);
+      closeWebSocket(owner.ws);
     }
   });
 
@@ -1384,6 +1525,12 @@ describe('portable graph jobs', () => {
     expect(await readJson(staleStatus)).toMatchObject({
       state: 'failed',
       error: 'Graph job became stale while assigned to a worker',
+      execution_receipt: {
+        schema: 'relay.execution-receipt.v1',
+        execution_id: staleFixture.jobId,
+        state: 'failed',
+        error_code: 'EXECUTION_FAILED',
+      },
     });
     const expiredStatus = await relay.fetch(new Request(
       `https://relay/internal/graph-jobs/${expiredFixture.jobId}`,

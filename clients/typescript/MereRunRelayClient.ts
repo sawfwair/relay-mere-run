@@ -181,23 +181,59 @@ export interface ChatMessage {
   image_url?: string;
 }
 
+export interface TextAdapterReference {
+  manifest_sha256: string;
+  base_model_id: string;
+  scale?: number;
+}
+
+export interface IdentityExecutionReference {
+  persona_id: string;
+  version_id: string;
+  deployment_id: string;
+}
+
+export interface RelayExecutionReceipt {
+  schema: 'relay.execution-receipt.v1';
+  execution_id: string;
+  request_sha256: string;
+  execution_spec_sha256?: string;
+  model_id: string;
+  adapter_manifest_sha256?: string;
+  provider_id: string;
+  provider_version?: string;
+  provider_catalog_sha256?: string;
+  device_id?: string;
+  started_at: string | null;
+  completed_at: string;
+  duration_ms?: number;
+  state: 'complete' | 'failed' | 'cancelled';
+  output_sha256?: string;
+  error_code?: string;
+}
+
 export interface SubmitChatRequest {
   messages: ChatMessage[];
   max_tokens?: number;
   temperature?: number;
   requires_json?: boolean;
   use_lora?: boolean;
+  adapter?: TextAdapterReference;
+  required_device_id?: string;
+  execution_spec_sha256?: string;
+  identity?: IdentityExecutionReference;
+  idempotency_key?: string;
   model?: string;
 }
 
 export interface SubmitChatResponse {
   chat_id: string;
-  status: 'assigned' | 'queued';
+  status: 'assigned' | 'queued' | 'complete' | 'failed' | 'cancelled';
   agent_id?: string;
   position?: number;
 }
 
-export type ChatStatus = 'queued' | 'processing' | 'complete' | 'failed';
+export type ChatStatus = 'queued' | 'processing' | 'complete' | 'failed' | 'cancelled';
 
 export interface ChatStatusResponse {
   chat_id: string;
@@ -212,6 +248,7 @@ export interface ChatStatusResponse {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  execution_receipt?: RelayExecutionReceipt | null;
 }
 
 export interface TalkRequest {
@@ -807,6 +844,12 @@ export class MereRunRelayClient {
     return this.request(`/chat/${encodeURIComponent(chatId)}`, isChatStatusResponse);
   }
 
+  async cancelChat(chatId: string): Promise<CancelJobResponse> {
+    return this.request(`/chat/${encodeURIComponent(chatId)}/cancel`, isCancelResponse, {
+      method: 'POST',
+    });
+  }
+
   async pollChat(
     chatId: string,
     options?: PollOptions<ChatStatusResponse>
@@ -819,7 +862,7 @@ export class MereRunRelayClient {
       const status = await this.getChat(chatId);
       options?.onUpdate?.(status);
 
-      if (status.status === 'complete' || status.status === 'failed') {
+      if (status.status === 'complete' || status.status === 'failed' || status.status === 'cancelled') {
         return status;
       }
 

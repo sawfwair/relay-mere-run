@@ -7,13 +7,17 @@ import type {
   JobStatusResponse,
   Tool,
   ToolStatusResponse,
+  GraphJob,
 } from './types';
 import type { RelayContext } from './relay-context';
 import { scheduleNextRelayAlarm } from './relay-alarm';
+import { graphArtifactResponse, sha256Hex } from './relay-graph-storage';
 
 const WEBHOOK_BACKOFF_MS = [1000, 2000, 4000, 8000];
+const GRAPH_WEBHOOK_BACKOFF_MS = [1000, 5000, 30000, 120000, 300000];
+const MAX_EMBEDDED_RECEIPT_BYTES = 128000;
 
-type WebhookKind = 'job' | 'asr' | 'embed' | 'tool';
+type WebhookKind = 'job' | 'asr' | 'embed' | 'tool' | 'graph';
 type WebhookEvent =
   | 'job.completed'
   | 'job.failed'
@@ -26,7 +30,10 @@ type WebhookEvent =
   | 'embed.cancelled'
   | 'tool.completed'
   | 'tool.failed'
-  | 'tool.cancelled';
+  | 'tool.cancelled'
+  | 'graph.completed'
+  | 'graph.failed'
+  | 'graph.cancelled';
 
 export interface WebhookDeliveryState {
   kind?: WebhookKind;
@@ -46,7 +53,7 @@ interface WebhookDescriptor<T> {
   webhookUrl: string | null;
   webhookSent: boolean;
   event: WebhookEvent | null;
-  payload: JobStatusResponse | AsrStatusResponse | EmbedStatusResponse | ToolStatusResponse;
+  payload: JobStatusResponse | AsrStatusResponse | EmbedStatusResponse | ToolStatusResponse | Record<string, unknown>;
   storageKey: string;
   markSent(work: T): T;
 }
@@ -98,6 +105,13 @@ function getWebhookEventForToolStatus(status: Tool['status']): WebhookEvent | nu
   if (status === 'complete') return 'tool.completed';
   if (status === 'failed') return 'tool.failed';
   if (status === 'cancelled') return 'tool.cancelled';
+  return null;
+}
+
+function getWebhookEventForGraphState(state: GraphJob['state']): WebhookEvent | null {
+  if (state === 'finished') return 'graph.completed';
+  if (state === 'failed') return 'graph.failed';
+  if (state === 'cancelled') return 'graph.cancelled';
   return null;
 }
 
@@ -169,6 +183,93 @@ function getToolWebhookPayload(tool: Tool): ToolStatusResponse {
   };
 }
 
+function containsSensitiveReceiptValue(value: unknown, key = ''): boolean {
+  if (Array.isArray(value)) return value.some((entry) => containsSensitiveReceiptValue(entry, key));
+  if (value && typeof value === 'object') {
+    return Object.entries(value).some(([childKey, entry]) => (
+      containsSensitiveReceiptValue(entry, childKey)
+    ));
+  }
+  const normalizedKey = key.replace(/([a-z0-9])([A-Z])/gu, '$1_$2').toLowerCase();
+  const keyParts = normalizedKey.split(/[^a-z0-9]+/u);
+  if (keyParts.some((part) => [
+    'raw',
+    'prompt',
+    'response',
+    'secret',
+    'credential',
+    'token',
+    'checkpoint',
+    'weight',
+    'weights',
+    'log',
+    'logs',
+  ].includes(part))) {
+    return value !== null && value !== undefined;
+  }
+  return typeof value === 'string'
+    && (/^file:/iu.test(value) || /^\/(?!\/)/u.test(value) || /^[A-Za-z]:\\/u.test(value));
+}
+
+async function sanitizedGraphReceipt(
+  ctx: RelayContext,
+  graph: GraphJob,
+): Promise<Record<string, unknown> | null> {
+  const artifact = graph.artifacts.find((candidate) => (
+    candidate.name === 'receipt'
+    && candidate.content_type === 'application/vnd.mere.identity-receipt+json'
+    && candidate.size_bytes > 0
+    && candidate.size_bytes <= MAX_EMBEDDED_RECEIPT_BYTES
+  ));
+  if (!artifact) return null;
+  const response = await graphArtifactResponse(ctx, graph, artifact);
+  if (!response?.ok) return null;
+  const bytes = await response.arrayBuffer();
+  if (bytes.byteLength !== artifact.size_bytes || await sha256Hex(bytes) !== artifact.sha256) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value) || containsSensitiveReceiptValue(value)) {
+    return null;
+  }
+  return {
+    artifact: {
+      name: artifact.name,
+      content_type: artifact.content_type,
+      size_bytes: artifact.size_bytes,
+      sha256: artifact.sha256,
+    },
+    value,
+  };
+}
+
+export async function buildGraphWebhookPayload(
+  ctx: RelayContext,
+  graph: GraphJob,
+): Promise<Record<string, unknown>> {
+  const embeddedReceipt = graph.state === 'finished'
+    ? await sanitizedGraphReceipt(ctx, graph)
+    : null;
+  return {
+    job_id: graph.job_id,
+    state: graph.state,
+    agent_id: graph.agent_id,
+    assigned_device_id: graph.assigned_device_id,
+    execution_receipt: graph.execution_receipt ?? null,
+    artifacts: graph.artifacts,
+    error: graph.error,
+    created_at: graph.created_at,
+    assigned_at: graph.assigned_at,
+    started_at: graph.started_at,
+    completed_at: graph.completed_at,
+    run_manifest: graph.run_manifest,
+    ...(embeddedReceipt ? { sanitized_outputs: { receipt: embeddedReceipt } } : {}),
+  };
+}
+
 function getJobDescriptor(job: Job): WebhookDescriptor<Job> {
   return {
     kind: 'job',
@@ -225,6 +326,23 @@ function getToolDescriptor(tool: Tool): WebhookDescriptor<Tool> {
   };
 }
 
+async function getGraphDescriptor(
+  ctx: RelayContext,
+  graph: GraphJob,
+): Promise<WebhookDescriptor<GraphJob>> {
+  return {
+    kind: 'graph',
+    id: graph.job_id,
+    work: graph,
+    webhookUrl: graph.webhook_url ?? null,
+    webhookSent: graph.webhook_sent ?? false,
+    event: getWebhookEventForGraphState(graph.state),
+    payload: await buildGraphWebhookPayload(ctx, graph),
+    storageKey: `graph:${graph.job_id}`,
+    markSent: (currentGraph) => ({ ...currentGraph, webhook_sent: true }),
+  };
+}
+
 async function signWebhookPayload(
   ctx: RelayContext,
   timestamp: string,
@@ -233,6 +351,7 @@ async function signWebhookPayload(
   const rawSecret = ctx.env.WEBHOOK_SIGNING_SECRET;
   const secret =
     typeof rawSecret === 'string' ? rawSecret : rawSecret ? await rawSecret.get() : '';
+  if (!secret) throw new Error('Webhook signing secret is not configured');
   const encoder = new TextEncoder();
   const keyData = encoder.encode(secret);
   const data = encoder.encode(`${timestamp}.${rawBody}`);
@@ -264,16 +383,16 @@ async function attemptWebhookDelivery<T>(
 
   const rawBody = JSON.stringify(descriptor.payload);
   const timestamp = `${Math.floor(Date.now() / 1000)}`;
-  const signature = await signWebhookPayload(ctx, timestamp, rawBody);
-
   let ok = false;
   let lastError: string | null = null;
 
   const abortController = new AbortController();
   const timeoutId = setTimeout(() => abortController.abort(), getWebhookTimeoutMs(ctx));
   try {
+    const signature = await signWebhookPayload(ctx, timestamp, rawBody);
     const response = await fetch(descriptor.webhookUrl, {
       method: 'POST',
+      redirect: 'manual',
       headers: {
         'Content-Type': 'application/json',
         'X-MereRunRelay-Timestamp': timestamp,
@@ -307,8 +426,10 @@ async function attemptWebhookDelivery<T>(
       ctx.asrs.set(descriptor.id, marked as Asr);
     } else if (descriptor.kind === 'embed') {
       ctx.embeds.set(descriptor.id, marked as Embed);
-    } else {
+    } else if (descriptor.kind === 'tool') {
       ctx.tools.set(descriptor.id, marked as Tool);
+    } else {
+      ctx.graphJobs.set(descriptor.id, marked as GraphJob);
     }
     await ctx.storage.delete(stateKey);
     await scheduleNextRelayAlarm(ctx);
@@ -316,7 +437,7 @@ async function attemptWebhookDelivery<T>(
   }
 
   const attempts = attemptsSoFar + 1;
-  if (attempts >= getWebhookMaxAttempts(ctx)) {
+  if (attempts >= getWebhookMaxAttempts(ctx) && descriptor.kind !== 'graph') {
     console.error(
       `Webhook delivery exhausted retries for ${descriptor.kind} ${descriptor.id}: ${lastError ?? 'unknown error'}`
     );
@@ -325,7 +446,8 @@ async function attemptWebhookDelivery<T>(
     return;
   }
 
-  const backoffIndex = Math.min(attempts - 1, WEBHOOK_BACKOFF_MS.length - 1);
+  const backoffs = descriptor.kind === 'graph' ? GRAPH_WEBHOOK_BACKOFF_MS : WEBHOOK_BACKOFF_MS;
+  const backoffIndex = Math.min(attempts - 1, backoffs.length - 1);
   const state: WebhookDeliveryState = {
     kind: descriptor.kind,
     work_id: descriptor.id,
@@ -333,7 +455,7 @@ async function attemptWebhookDelivery<T>(
     webhook_url: descriptor.webhookUrl,
     event,
     attempts,
-    next_attempt_at: Date.now() + WEBHOOK_BACKOFF_MS[backoffIndex],
+    next_attempt_at: Date.now() + backoffs[backoffIndex],
     last_error: lastError,
   };
   await ctx.storage.put(stateKey, state);
@@ -351,7 +473,11 @@ async function scheduleWebhookIfNeeded<T>(
   const existingState = await ctx.storage.get<WebhookDeliveryState>(
     getWebhookStateKey(descriptor.kind, descriptor.id)
   );
-  if (existingState && existingState.attempts >= getWebhookMaxAttempts(ctx)) {
+  if (
+    descriptor.kind !== 'graph'
+    && existingState
+    && existingState.attempts >= getWebhookMaxAttempts(ctx)
+  ) {
     return;
   }
 
@@ -386,10 +512,27 @@ export async function scheduleToolWebhookIfNeeded(
   await scheduleWebhookIfNeeded(ctx, getToolDescriptor(tool));
 }
 
+export async function scheduleGraphWebhookIfNeeded(
+  ctx: RelayContext,
+  graph: GraphJob
+): Promise<void> {
+  await scheduleWebhookIfNeeded(ctx, await getGraphDescriptor(ctx, graph));
+}
+
+async function loadGraphDescriptor(
+  ctx: RelayContext,
+  id: string,
+): Promise<WebhookDescriptor<GraphJob> | null> {
+  const graph = await ctx.storage.get<GraphJob>(`graph:${id}`);
+  return graph && graph.webhook_url && !graph.webhook_sent
+    ? getGraphDescriptor(ctx, graph)
+    : null;
+}
+
 async function loadDescriptorForState(
   ctx: RelayContext,
   state: WebhookDeliveryState
-): Promise<WebhookDescriptor<Job | Asr | Embed | Tool> | null> {
+): Promise<WebhookDescriptor<Job | Asr | Embed | Tool | GraphJob> | null> {
   const kind = getStateKind(state);
   const id = getStateWorkId(state);
   if (!id) {
@@ -407,6 +550,10 @@ async function loadDescriptorForState(
   if (kind === 'embed') {
     const embed = await ctx.storage.get<Embed>(`embed:${id}`);
     return embed && embed.webhook_url && !embed.webhook_sent ? getEmbedDescriptor(embed) : null;
+  }
+
+  if (kind === 'graph') {
+    return loadGraphDescriptor(ctx, id);
   }
 
   const tool = await ctx.storage.get<Tool>(`tool:${id}`);

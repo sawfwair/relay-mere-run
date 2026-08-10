@@ -94,8 +94,16 @@ export function supportsJob(info: AgentInfo, job: Job): boolean {
 }
 
 export function supportsChat(info: AgentInfo, chat: Chat): boolean {
-  if (chat.model?.trim()) {
-    if (!agentHasModel(info, chat.model) && !agentHasModel(info, 'text')) {
+  if (chat.required_device_id && info.device_id !== chat.required_device_id) {
+    return false;
+  }
+  const effectiveModel = chat.model?.trim() || chat.adapter?.base_model_id;
+  if (effectiveModel) {
+    const requiresExactModel = Boolean(chat.adapter || chat.execution_spec_sha256);
+    const hasModel = requiresExactModel
+      ? agentHasModel(info, effectiveModel)
+      : agentHasModel(info, effectiveModel) || agentHasModel(info, 'text');
+    if (!hasModel) {
       return false;
     }
   } else if (
@@ -108,6 +116,14 @@ export function supportsChat(info: AgentInfo, chat: Chat): boolean {
 
   if (chat.use_lora === true && !info.capabilities.lora) {
     return false;
+  }
+
+  if (chat.adapter) {
+    const installed = info.capabilities.text_adapters ?? [];
+    if (!installed.some((adapter) =>
+      adapter.manifest_sha256 === chat.adapter?.manifest_sha256
+      && adapter.base_model_id === chat.adapter.base_model_id
+    )) return false;
   }
 
   return true;
@@ -192,34 +208,20 @@ export function supportsTool(info: AgentInfo, tool: Tool): boolean {
   });
 }
 
-export function graphCapabilityBlockers(
-  info: AgentInfo,
-  graph: GraphJob
-): GraphPlacementBlocker[] {
+function requiredDeviceBlockers(info: AgentInfo, graph: GraphJob): GraphPlacementBlocker[] {
+  const requiredDeviceId = graph.job.requirements.required_device_id;
+  if (!requiredDeviceId || info.device_id === requiredDeviceId) return [];
+  return [{
+    code: 'required_device_mismatch',
+    message: `Job is pinned to device ${requiredDeviceId}`,
+  }];
+}
+
+function graphProviderBlockers(info: AgentInfo, graph: GraphJob): GraphPlacementBlocker[] {
   const blockers: GraphPlacementBlocker[] = [];
-  const worker = info.capabilities.graph_worker;
-  if (!worker) {
-    return [{ code: 'graph_worker_missing', message: 'Node does not advertise graph worker support' }];
-  }
-  if (!worker.contract_versions.includes(graph.job.contract_version)) {
-    blockers.push({
-      code: 'contract_version_unsupported',
-      message: `Graph contract ${graph.job.contract_version} is not supported`,
-    });
-  }
-  if (compareVersions(worker.worker_version, graph.job.requirements.minimum_mere_run_version) < 0) {
-    blockers.push({
-      code: 'worker_version_too_old',
-      message: `Worker ${worker.worker_version} is older than required ${graph.job.requirements.minimum_mere_run_version}`,
-    });
-  }
-  for (const kind of graph.job.requirements.node_kinds) {
-    if (!worker.node_kinds.includes(kind)) {
-      blockers.push({ code: 'node_kind_missing', message: `Node kind ${kind} is not supported` });
-    }
-  }
+  const providers = info.capabilities.graph_worker?.providers ?? [];
   for (const required of graph.job.requirements.providers ?? []) {
-    const provider = (worker.providers ?? []).find((candidate) => candidate.id === required.id);
+    const provider = providers.find((candidate) => candidate.id === required.id);
     if (!provider) {
       blockers.push({
         code: 'graph_provider_missing',
@@ -243,6 +245,36 @@ export function graphCapabilityBlockers(
       }
     }
   }
+  return blockers;
+}
+
+export function graphCapabilityBlockers(
+  info: AgentInfo,
+  graph: GraphJob
+): GraphPlacementBlocker[] {
+  const blockers = requiredDeviceBlockers(info, graph);
+  const worker = info.capabilities.graph_worker;
+  if (!worker) {
+    return [{ code: 'graph_worker_missing', message: 'Node does not advertise graph worker support' }];
+  }
+  if (!worker.contract_versions.includes(graph.job.contract_version)) {
+    blockers.push({
+      code: 'contract_version_unsupported',
+      message: `Graph contract ${graph.job.contract_version} is not supported`,
+    });
+  }
+  if (compareVersions(worker.worker_version, graph.job.requirements.minimum_mere_run_version) < 0) {
+    blockers.push({
+      code: 'worker_version_too_old',
+      message: `Worker ${worker.worker_version} is older than required ${graph.job.requirements.minimum_mere_run_version}`,
+    });
+  }
+  for (const kind of graph.job.requirements.node_kinds) {
+    if (!worker.node_kinds.includes(kind)) {
+      blockers.push({ code: 'node_kind_missing', message: `Node kind ${kind} is not supported` });
+    }
+  }
+  blockers.push(...graphProviderBlockers(info, graph));
   for (const model of graph.job.requirements.model_ids) {
     if (!worker.installed_model_ids.includes(model)) {
       blockers.push({ code: 'model_missing', message: `Required model ${model} is not installed` });
@@ -656,6 +688,7 @@ async function sendChatToAgent(
     temperature: chat.temperature ?? 0.7,
     requires_json: chat.requires_json,
     use_lora: chat.use_lora,
+    adapter: chat.adapter,
     model: chat.model,
   };
 
@@ -834,6 +867,7 @@ async function sendGraphToAgent(
   try {
     agent.ws.send(JSON.stringify(message));
     graph.agent_id = agent.info.agent_id;
+    graph.assigned_device_id = agent.info.device_id;
     graph.state = 'assigned';
     graph.assigned_at = new Date().toISOString();
     graph.updated_at = graph.assigned_at;
