@@ -38,6 +38,8 @@ import {
   storeSubmittedBundleDocuments,
   verifiedGraphArtifactUpload,
 } from './relay-graph-storage';
+import { buildGraphReceipt } from './relay-receipts';
+import { sanitizedTerminalError, sha256Json } from './execution';
 
 const CONTRACT_VERSION = 'mere.run/job-bundle.v1';
 const GRAPH_KIND = 'mere.run/workflow-graph';
@@ -46,6 +48,7 @@ const PORT_ID_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const JOB_ID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
 const PROVIDER_ID_PATTERN = /^mere-[a-z0-9-]+$/;
+const DEVICE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const RUN_STATES = new Set(['planned', 'preflighting', 'queued', 'assigned', 'running', 'finished', 'failed', 'cancelled']);
 const INPUT_TYPES = new Set([
   'string',
@@ -86,6 +89,26 @@ const BUNDLE_DOCUMENT_VALUES = {
 } as const;
 const MAX_ARTIFACT_PART_BYTES = 16 * 1024 * 1024;
 const MAX_ARTIFACT_PARTS = 16_384;
+
+interface GraphIdempotencyRecord {
+  job_id: string;
+  request_sha256: string;
+}
+
+function graphRequestContent(body: SubmitGraphJobRequest): unknown {
+  const job = Object.fromEntries(
+    Object.entries(body.job).filter(
+      ([key]) => !['job_id', 'created_at', 'idempotency_key'].includes(key),
+    ),
+  );
+  return {
+    job,
+    graph: body.graph,
+    inputs: body.inputs,
+    assets: body.assets,
+    bundle_documents: body.bundle_documents,
+  };
+}
 
 function jsonValuesEqual(left: unknown, right: unknown): boolean {
   if (left === right) return true;
@@ -137,9 +160,11 @@ function graphResponse(ctx: RelayContext, job: GraphJob): Record<string, unknown
     started_at: job.started_at,
     completed_at: job.completed_at,
     attempt: job.attempt,
+    run_manifest: job.run_manifest,
     artifacts: job.artifacts,
     error: job.error,
     metrics: job.metrics,
+    execution_receipt: job.execution_receipt ?? null,
     placement: graphPlacementReport(ctx, job),
   };
 }
@@ -230,6 +255,56 @@ function retainGraphEvent(job: GraphJob, event: GraphEventMessage['event']): voi
   }
 }
 
+function requestAssignedNodeInventory(ctx: RelayContext, agentId: string | null): void {
+  if (!agentId) return;
+  try {
+    ctx.getConnectedAgents().get(agentId)?.ws.send(JSON.stringify({ type: 'inventory_request' }));
+  } catch (error) {
+    console.error(`Failed to refresh graph node inventory for ${agentId}:`, error);
+  }
+}
+
+function validateDeviceAndResourceRequirements(body: SubmitGraphJobRequest): string | null {
+  const requiredDeviceId = body.job.requirements.required_device_id;
+  if (requiredDeviceId !== undefined && !DEVICE_ID_PATTERN.test(requiredDeviceId)) {
+    return 'invalid required graph device id';
+  }
+  const positiveRequirements = [
+    body.job.requirements.minimum_accelerator_memory_bytes,
+    body.job.requirements.minimum_system_memory_bytes,
+    body.job.requirements.minimum_disk_bytes,
+    body.job.requirements.minimum_cpu_cores,
+  ];
+  if (positiveRequirements.some((value) => value !== undefined && (!Number.isSafeInteger(value) || value <= 0))) {
+    return 'graph resource requirements must be positive integers';
+  }
+  return validateWebhookUrl(body.job.webhook_url);
+}
+
+function validateWebhookUrl(value: string | undefined): string | null {
+  if (!value) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return 'graph webhook_url must be a public HTTPS origin';
+  }
+  const hostname = url.hostname.toLowerCase();
+  const isIpLiteral = /^\[.*\]$/u.test(hostname) || /^\d{1,3}(?:\.\d{1,3}){3}$/u.test(hostname);
+  if (
+    url.protocol !== 'https:'
+    || url.username
+    || url.password
+    || isIpLiteral
+    || !hostname.includes('.')
+    || hostname === 'localhost'
+    || hostname.endsWith('.localhost')
+    || hostname.endsWith('.local')
+    || hostname.endsWith('.internal')
+  ) return 'graph webhook_url must be a public HTTPS origin';
+  return null;
+}
+
 export function validateCreateRequest(body: SubmitGraphJobRequest): string | null {
   if (body.job?.contract_version !== CONTRACT_VERSION) return `contract_version must be ${CONTRACT_VERSION}`;
   if (!JOB_ID_PATTERN.test(body.job.job_id)) return 'job_id must be a lowercase UUID';
@@ -249,15 +324,8 @@ export function validateCreateRequest(body: SubmitGraphJobRequest): string | nul
   if (!Array.isArray(requiredSecrets)
       || new Set(requiredSecrets).size !== requiredSecrets.length
       || requiredSecrets.some((name) => !ID_PATTERN.test(name))) return 'invalid graph secret requirements';
-  const positiveRequirements = [
-    body.job.requirements.minimum_accelerator_memory_bytes,
-    body.job.requirements.minimum_system_memory_bytes,
-    body.job.requirements.minimum_disk_bytes,
-    body.job.requirements.minimum_cpu_cores,
-  ];
-  if (positiveRequirements.some((value) => value !== undefined && (!Number.isSafeInteger(value) || value <= 0))) {
-    return 'graph resource requirements must be positive integers';
-  }
+  const requirementsError = validateDeviceAndResourceRequirements(body);
+  if (requirementsError) return requirementsError;
 
   for (const [name, definition] of Object.entries(body.graph.inputs)) {
     if (!ID_PATTERN.test(name) || !definition || !INPUT_TYPES.has(definition.type)) return `invalid graph input: ${name}`;
@@ -417,6 +485,8 @@ export function handlePreflightGraphJob(ctx: RelayContext, body: SubmitGraphJobR
     max_attempts: 1,
     node_token: '',
     relay_origin: '',
+    webhook_url: body.job.webhook_url ?? null,
+    webhook_sent: false,
   };
   return Response.json({ placement: graphPlacementReport(ctx, graph) }, {
     headers: { 'Cache-Control': 'no-store' },
@@ -436,6 +506,35 @@ async function missingDigests(ctx: RelayContext, job: GraphJob): Promise<string[
   return missing.sort();
 }
 
+async function repeatedGraphSubmission(
+  ctx: RelayContext,
+  body: SubmitGraphJobRequest,
+  requestSha256: string,
+): Promise<Response | null> {
+  const idempotencyKey = body.job.idempotency_key?.trim();
+  if (idempotencyKey) {
+    const record = await ctx.storage.get<GraphIdempotencyRecord>(`graph-idempotency:${idempotencyKey}`);
+    if (record) {
+      const matches = record.request_sha256 === requestSha256;
+      const original = matches ? await ctx.getGraphJob(record.job_id) : null;
+      if (original) return Response.json(graphResponse(ctx, original));
+      return Response.json({
+        error: 'Idempotency key was already used for a different graph request.',
+        code: 'IDEMPOTENCY_CONFLICT',
+      }, { status: 409 });
+    }
+  }
+  const existing = await ctx.getGraphJob(body.job.job_id);
+  if (!existing) return null;
+  if (existing.request_sha256 === requestSha256) {
+    return Response.json(graphResponse(ctx, existing));
+  }
+  return Response.json({
+    error: 'Graph job id was already used for a different immutable bundle',
+    code: 'IDEMPOTENCY_CONFLICT',
+  }, { status: 409 });
+}
+
 export async function handleCreateGraphJob(
   ctx: RelayContext,
   body: SubmitGraphJobRequest,
@@ -444,7 +543,10 @@ export async function handleCreateGraphJob(
 ): Promise<Response> {
   const error = validateCreateRequest(body);
   if (error) return Response.json({ error }, { status: 400 });
-  if (await ctx.getGraphJob(body.job.job_id)) return Response.json({ error: 'Graph job already exists' }, { status: 409 });
+  const requestSha256 = await sha256Json(graphRequestContent(body));
+  const idempotencyKey = body.job.idempotency_key?.trim();
+  const replay = await repeatedGraphSubmission(ctx, body, requestSha256);
+  if (replay) return replay;
   const quota = await enforceGraphSubmissionQuotas(ctx, body, userId);
   if (quota) return quota;
 
@@ -476,11 +578,20 @@ export async function handleCreateGraphJob(
     max_attempts: 1,
     node_token: crypto.randomUUID().replaceAll('-', ''),
     relay_origin: body.relay_origin || origin,
+    webhook_url: body.job.webhook_url ?? null,
+    webhook_sent: false,
+    request_sha256: requestSha256,
   };
   const bundleDocuments = decodeBundleDocuments(body);
   if (bundleDocuments) await storeSubmittedBundleDocuments(ctx, graph, bundleDocuments);
   graph.missing_asset_digests = await missingDigests(ctx, graph);
   await ctx.saveGraphJob(graph);
+  if (idempotencyKey) {
+    await ctx.storage.put(`graph-idempotency:${idempotencyKey}`, {
+      job_id: graph.job_id,
+      request_sha256: requestSha256,
+    } satisfies GraphIdempotencyRecord);
+  }
   await recordGraphTelemetry(ctx, { submissions: 1 });
   await scheduleGraphMaintenance(ctx);
   return Response.json({
@@ -576,8 +687,12 @@ export async function handleCancelGraphJob(ctx: RelayContext, jobId: string): Pr
   job.error = 'Cancelled by client';
   job.completed_at = new Date().toISOString();
   job.updated_at = job.completed_at;
+  job.execution_receipt = await buildGraphReceipt(job, 'cancelled', job.completed_at, {
+    error: job.error,
+  });
   await ctx.saveGraphJob(job);
   ctx.graphJobs.delete(jobId);
+  await ctx.scheduleGraphWebhookIfNeeded(job);
   return Response.json(graphResponse(ctx, job));
 }
 
@@ -594,6 +709,7 @@ export async function handleRetryGraphJob(ctx: RelayContext, jobId: string): Pro
   job.assigned_at = null;
   job.started_at = null;
   job.completed_at = null;
+  job.execution_receipt = undefined;
   job.updated_at = new Date().toISOString();
   job.events = [];
   job.last_event_sequence = -1;
@@ -690,6 +806,16 @@ export async function handleGraphResult(
   job.error = null;
   job.completed_at = new Date().toISOString();
   job.updated_at = job.completed_at;
+  job.execution_receipt = await buildGraphReceipt(job, 'complete', job.completed_at, {
+    output: {
+      run_manifest: manifest,
+      artifacts: message.artifacts.map((artifact) => ({
+        name: artifact.name,
+        sha256: artifact.sha256,
+        size_bytes: artifact.size_bytes,
+      })),
+    },
+  });
   releaseAgent(ctx, job.agent_id);
   await ctx.env.IMAGES.put(
     graphRunManifestKey(job.user_id, job.job_id),
@@ -697,7 +823,9 @@ export async function handleGraphResult(
     { httpMetadata: { contentType: 'application/json' } },
   );
   await ctx.saveGraphJob(job);
+  requestAssignedNodeInventory(ctx, job.agent_id);
   ctx.graphJobs.delete(job.job_id);
+  await ctx.scheduleGraphWebhookIfNeeded(job);
   await ctx.assignQueuedWork();
 }
 
@@ -719,11 +847,15 @@ export async function handleGraphError(
   if (job.state === 'finished' || job.state === 'failed') return;
   releaseAgent(ctx, job.agent_id);
   job.state = 'failed';
-  job.error = message.error;
+  job.error = sanitizedTerminalError(message.error);
   job.completed_at = new Date().toISOString();
   job.updated_at = job.completed_at;
+  job.execution_receipt = await buildGraphReceipt(job, 'failed', job.completed_at, {
+    error: job.error,
+  });
   await ctx.saveGraphJob(job);
   ctx.graphJobs.delete(job.job_id);
+  await ctx.scheduleGraphWebhookIfNeeded(job);
   await ctx.assignQueuedWork();
 }
 

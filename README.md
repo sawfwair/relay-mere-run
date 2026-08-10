@@ -33,6 +33,7 @@ a private deployment configuration and must not be committed.
 - [web/README.md](./web/README.md) — fleet-console ownership and response-boundary rules.
 - [node/README.md](./node/README.md) — native node architecture and local development.
 - [docs/graph-jobs.md](./docs/graph-jobs.md) — portable graph contract.
+- [docs/identity-execution.md](./docs/identity-execution.md) — immutable identity execution and receipt contracts.
 - [clients/README.md](./clients/README.md) — public client surfaces.
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — development and pull-request expectations.
 - [SECURITY.md](./SECURITY.md) — private vulnerability reporting.

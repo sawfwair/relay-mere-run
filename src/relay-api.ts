@@ -24,6 +24,7 @@ import {
 import {
   handleSubmitChat,
   handleGetChat,
+  handleCancelChat,
 } from './relay-api-chat';
 import {
   handleSubmitTalk,
@@ -114,6 +115,7 @@ export function createRelayRouteHandlers(ctx: RelayContext): RelayRouteHandlers 
     handleImageUpload: (jobId: string, request: Request) => handleImageUpload(ctx, jobId, request),
     handleSubmitChat: (request, userId) => handleSubmitChat(ctx, request, userId),
     handleGetChat: (chatId: string) => handleGetChat(ctx, chatId),
+    handleCancelChat: (chatId: string) => handleCancelChat(ctx, chatId),
     handleSubmitTalk: (request, userId) => handleSubmitTalk(ctx, request, userId),
     handleGetTalk: (talkId: string) => handleGetTalk(ctx, talkId),
     handleCancelTalk: (talkId: string) => handleCancelTalk(ctx, talkId),

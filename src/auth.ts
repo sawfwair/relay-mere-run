@@ -57,7 +57,7 @@ export function isTransientJwksError(error: unknown): boolean {
   return error.code === 'ERR_JWKS_TIMEOUT' || error.code === 'ERR_JWKS_FETCH_FAILED';
 }
 
-function clearJwksCache(): void {
+export function clearJwksCache(): void {
   jwks = null;
   jwksOrigin = null;
 }
@@ -81,15 +81,15 @@ function parseBearerToken(request: Request): string | null {
 
 /**
  * Verify a brokered JWT and resolve it to its owner. `jwtVerify` checks the
- * signature (via JWKS), expiry, and issuer; `sub` is the stable user id we key
- * the per-user Durable Object (and the agent pool) on. Audience is intentionally
- * not checked — the broker stamps a fixed audience on every JWT.
+ * signature (via JWKS), expiry, issuer, and Relay audience; `sub` is the stable
+ * user id we key the per-user Durable Object (and the agent pool) on.
  */
 export async function verifyBrokerToken(token: string, env: Env): Promise<AuthResult | null> {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const { payload } = await jwtVerify(token, getJwks(env.BROKER_ORIGIN), {
         issuer: env.BROKER_ORIGIN,
+        audience: 'mere-run-relay',
       });
       if (typeof payload.sub === 'string' && payload.sub) {
         return {

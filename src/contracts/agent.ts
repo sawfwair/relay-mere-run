@@ -73,6 +73,10 @@ export const agentCapabilitiesSchema = z.object({
   max_resolution: z.number(),
   controlnet: z.boolean(),
   lora: z.boolean(),
+  text_adapters: z.array(z.object({
+    manifest_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    base_model_id: z.string(),
+  }).passthrough()).optional(),
   img2img: z.boolean(),
   plugins: z.array(pluginCapabilitySchema).optional(),
   graph_worker: graphWorkerCapabilitiesSchema.optional(),

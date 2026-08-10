@@ -140,6 +140,23 @@ async function hydrateDirectImage(
   return job;
 }
 
+function handleClientChatLookup(
+  path: string,
+  request: Request,
+  relay: DurableObjectStub,
+  origin: string,
+): Promise<Response> | null {
+  const cancelMatch = path.match(/^\/chat\/([^/]+)\/cancel$/);
+  if (cancelMatch && request.method === 'POST') {
+    return relay.fetch(new Request(`${origin}/internal/chat/${cancelMatch[1]}`, { method: 'POST' }));
+  }
+  const statusMatch = path.match(/^\/chat\/([^/]+)$/);
+  if (statusMatch && request.method === 'GET') {
+    return relay.fetch(new Request(`${origin}/internal/chat/${statusMatch[1]}`));
+  }
+  return null;
+}
+
 /**
  * Handle client HTTP API requests
  * All requests are already authenticated (user_id verified)
@@ -781,13 +798,8 @@ async function handleClientApiUnchecked(
     return relay.fetch(doRequest);
   }
 
-  // GET /api/chat/:chat_id
-  const chatMatch = path.match(/^\/chat\/([^/]+)$/);
-  if (chatMatch && request.method === 'GET') {
-    const chatId = chatMatch[1];
-    const doRequest = new Request(`${url.origin}/internal/chat/${chatId}`);
-    return relay.fetch(doRequest);
-  }
+  const chatLookup = handleClientChatLookup(path, request, relay, url.origin);
+  if (chatLookup) return chatLookup;
 
   // POST /api/talk
   if (path === '/talk' && request.method === 'POST') {

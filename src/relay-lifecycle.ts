@@ -1,5 +1,6 @@
 import type { AgentInfo } from './types';
 import type { RelayContext, WebSocketAttachment } from './relay-context';
+import { buildChatReceiptBase, buildGraphReceipt } from './relay-receipts';
 
 export function getWebSocketAttachment(ws: WebSocket): WebSocketAttachment | null {
   return ws.deserializeAttachment() as WebSocketAttachment | null;
@@ -221,7 +222,12 @@ export async function failInProgressWork(
     chat.status = 'failed';
     chat.error = reason;
     chat.completed_at = completedAt;
-    await ctx.storage.put(`chat:${chat.chat_id}`, chat);
+    chat.execution_receipt = {
+      ...buildChatReceiptBase(ctx, chat, completedAt),
+      state: 'failed',
+      error_code: 'EXECUTION_FAILED',
+    };
+    await ctx.saveChat(chat);
     ctx.chats.delete(chat.chat_id);
     return;
   }
@@ -285,6 +291,7 @@ export async function failInProgressWork(
     if (graph.attempt < graph.max_attempts) {
       graph.state = 'queued';
       graph.agent_id = null;
+      graph.assigned_device_id = undefined;
       graph.error = null;
       graph.assigned_at = null;
       graph.started_at = null;
@@ -296,7 +303,9 @@ export async function failInProgressWork(
     graph.error = reason;
     graph.completed_at = completedAt;
     graph.updated_at = completedAt;
-    await ctx.storage.put(`graph:${graph.job_id}`, graph);
+    graph.execution_receipt = await buildGraphReceipt(graph, 'failed', completedAt, { error: reason });
+    await ctx.saveGraphJob(graph);
     ctx.graphJobs.delete(graph.job_id);
+    await ctx.scheduleGraphWebhookIfNeeded(graph);
   }
 }

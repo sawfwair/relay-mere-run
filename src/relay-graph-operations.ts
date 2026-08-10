@@ -1,6 +1,7 @@
 import type { RelayContext } from './relay-context';
 import { GRAPH_MAINTENANCE_ALARM_KEY, scheduleNextRelayAlarm } from './relay-alarm';
 import { releaseAgent } from './relay-lifecycle';
+import { buildGraphReceipt } from './relay-receipts';
 import type { GraphJob, SubmitGraphJobRequest } from './types';
 
 const TERMINAL_GRAPH_STATES = new Set(['finished', 'failed', 'cancelled']);
@@ -229,14 +230,22 @@ export async function handleGraphMaintenanceAlarm(ctx: RelayContext, now = Date.
     if (job.attempt < job.max_attempts) {
       job.state = 'queued';
       job.error = null;
+      job.assigned_device_id = undefined;
       staleJobsRequeued += 1;
     } else {
       job.state = 'failed';
       job.error = 'Graph job became stale while assigned to a worker';
       job.completed_at = job.updated_at;
+      job.execution_receipt = await buildGraphReceipt(
+        job,
+        'failed',
+        job.completed_at,
+        { error: job.error },
+      );
       staleJobsFailed += 1;
     }
     await ctx.saveGraphJob(job);
+    if (job.state === 'failed') await ctx.scheduleGraphWebhookIfNeeded(job);
   }
 
   const retentionCutoff = now - configured.retentionMilliseconds;

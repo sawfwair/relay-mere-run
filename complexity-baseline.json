@@ -4,7 +4,7 @@
   "hotspots": {
     "clients/typescript/MereRunRelayClient.ts::Async method 'subscribeJobStream'": 70,
     "node/src/App.tsx::Function 'App'": 23,
-    "src/client-api.ts::Async function 'handleClientApiUnchecked'": 172,
+    "src/client-api.ts::Async function 'handleClientApiUnchecked'": 171,
     "src/index.ts::Function 'parseNodeReleaseManifest'": 25,
     "src/index.ts::Async function 'handlePublicMedia'": 25,
     "src/index.ts::Async method 'fetch'": 46,
@@ -18,9 +18,9 @@
     "src/relay-fleet.ts::Function 'activityFromStored'": 34,
     "src/relay-fleet.ts::Function 'scoreAgentForWork'": 21,
     "src/relay-lifecycle.ts::Async function 'failInProgressWork'": 41,
-    "src/relay-queue.ts::Function 'graphCapabilityBlockers'": 38,
+    "src/relay-queue.ts::Function 'graphCapabilityBlockers'": 30,
     "src/relay-queue.ts::Async function 'assignQueuedWork'": 25,
-    "src/relay-routing.ts::Async function 'handleRelayFetchUnchecked'": 130,
+    "src/relay-routing.ts::Async function 'handleRelayFetchUnchecked'": 129,
     "src/relay-websocket.ts::Async function 'handleRelayWebSocketMessage'": 40,
     "web/src/App.tsx::Function 'NodeRow'": 47
   }

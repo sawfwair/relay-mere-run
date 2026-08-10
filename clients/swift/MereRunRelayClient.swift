@@ -57,6 +57,7 @@ public enum MereRunRelayChatStatus: String, Codable, Sendable {
     case processing
     case complete
     case failed
+    case cancelled
 }
 
 public enum MereRunRelayTalkStatus: String, Codable, Sendable {
@@ -723,6 +724,15 @@ public final class MereRunRelayClient {
         return try await performRequest(path: "/chat/\(encoded)", method: "GET", responseType: MereRunRelayChatStatusResponse.self)
     }
 
+    public func cancelChat(chatId: String) async throws -> MereRunRelayCancelResponse {
+        let encoded = chatId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? chatId
+        return try await performRequest(
+            path: "/chat/\(encoded)/cancel",
+            method: "POST",
+            responseType: MereRunRelayCancelResponse.self
+        )
+    }
+
     public func pollChat(
         chatId: String,
         timeout: TimeInterval = 120,
@@ -736,7 +746,7 @@ public final class MereRunRelayClient {
             let status = try await getChat(chatId: chatId)
             onUpdate?(status)
 
-            if status.status == .complete || status.status == .failed {
+            if status.status == .complete || status.status == .failed || status.status == .cancelled {
                 return status
             }
 

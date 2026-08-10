@@ -89,6 +89,7 @@ export interface RelayRouteHandlers {
     userId: string
   ): Promise<Response>;
   handleGetChat(chatId: string): Promise<Response>;
+  handleCancelChat(chatId: string): Promise<Response>;
   handleSubmitTalk(
     request: SubmitTalkRequest & { client_id: string; relay_origin?: string },
     userId: string
@@ -152,6 +153,17 @@ export async function handleRelayFetch(
     if (response) return response;
     throw error;
   }
+}
+
+function handleInternalChatLookup(
+  handlers: RelayRouteHandlers,
+  request: Request,
+  pathname: string,
+): Promise<Response> | null {
+  const match = pathname.match(/^\/internal\/chat\/([^/]+)$/);
+  if (match && request.method === 'GET') return handlers.handleGetChat(match[1]);
+  if (match && request.method === 'POST') return handlers.handleCancelChat(match[1]);
+  return null;
 }
 
 async function handleRelayFetchUnchecked(
@@ -377,10 +389,8 @@ async function handleRelayFetchUnchecked(
     return handlers.handleSubmitChat(body, handlers.getRequestUserId(request));
   }
 
-  const chatMatch = url.pathname.match(/^\/internal\/chat\/([^/]+)$/);
-  if (chatMatch && request.method === 'GET') {
-    return handlers.handleGetChat(chatMatch[1]);
-  }
+  const chatLookup = handleInternalChatLookup(handlers, request, url.pathname);
+  if (chatLookup) return chatLookup;
 
   if (url.pathname === '/internal/talk/submit' && request.method === 'POST') {
     const body = await readRequestJson(request, submitTalkInternalSchema);

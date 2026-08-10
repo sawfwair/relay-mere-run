@@ -34,6 +34,7 @@ use crate::protocol::{
 use crate::work_gate::DeviceWorkGate;
 
 type ActiveGraphJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
+type ActiveChatJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type ActiveModelPlans = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type ActiveTalkJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type ActiveAsrJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
@@ -78,6 +79,7 @@ async fn collect_inventory(configured_models: &[String]) -> NodeInventory {
         .await
         .ok()
         .flatten();
+    let text_adapters = mererun::text_adapter_capabilities();
     let (capability_models, plugin_capabilities, runtime_inventory, system, asr_streaming) = tokio::join!(
         tokio::time::timeout(
             Duration::from_secs(12),
@@ -105,6 +107,7 @@ async fn collect_inventory(configured_models: &[String]) -> NodeInventory {
         system.ok(),
         graph_worker,
         asr_streaming.ok().flatten(),
+        text_adapters,
     )
 }
 
@@ -117,12 +120,14 @@ fn assemble_inventory(
     system: Option<AgentSystemInfo>,
     graph_worker: Option<GraphWorkerCapabilities>,
     asr_streaming: Option<AsrStreamingCapabilities>,
+    text_adapters: Vec<crate::protocol::TextAdapterCapability>,
 ) -> NodeInventory {
     let capabilities = AgentCapabilities {
         models: capability_models.unwrap_or(fallback.capabilities.models),
         max_resolution: fallback.capabilities.max_resolution,
         controlnet: fallback.capabilities.controlnet,
-        lora: fallback.capabilities.lora,
+        lora: !text_adapters.is_empty() || fallback.capabilities.lora,
+        text_adapters,
         img2img: fallback.capabilities.img2img,
         plugins: plugin_capabilities.unwrap_or(fallback.capabilities.plugins),
         graph_worker,
@@ -150,6 +155,7 @@ fn fallback_inventory(configured_models: &[String]) -> NodeInventory {
             max_resolution: 2048,
             controlnet: false,
             lora: false,
+            text_adapters: Vec::new(),
             img2img: true,
             plugins: vec![crate::native_video::capability()],
             graph_worker: None,
@@ -566,6 +572,7 @@ async fn connect_and_serve<R: Runtime>(
     });
 
     let active_graphs = ActiveGraphJobs::default();
+    let active_chats = ActiveChatJobs::default();
     let active_model_plans = ActiveModelPlans::default();
     let active_talks = ActiveTalkJobs::default();
     let active_asrs = ActiveAsrJobs::default();
@@ -625,6 +632,7 @@ async fn connect_and_serve<R: Runtime>(
                                     app,
                                     out_tx: &out_tx,
                                     active_graphs: &active_graphs,
+                                    active_chats: &active_chats,
                                     active_model_plans: &active_model_plans,
                                     active_asrs: &active_asrs,
                                     active_tools: &active_tools,
@@ -654,6 +662,7 @@ async fn connect_and_serve<R: Runtime>(
                         let task_app = app.clone();
                         let task_out = out_tx.clone();
                         let task_graphs = active_graphs.clone();
+                        let task_chats = active_chats.clone();
                         let task_plans = active_model_plans.clone();
                         let task_asrs = active_asrs.clone();
                         let task_tools = active_tools.clone();
@@ -666,6 +675,7 @@ async fn connect_and_serve<R: Runtime>(
                                     app: &task_app,
                                     out_tx: &task_out,
                                     active_graphs: &task_graphs,
+                                    active_chats: &task_chats,
                                     active_model_plans: &task_plans,
                                     active_asrs: &task_asrs,
                                     active_tools: &task_tools,
@@ -689,24 +699,16 @@ async fn connect_and_serve<R: Runtime>(
         }
     };
 
-    for cancel in active_graphs.lock().await.values() {
-        let _ = cancel.send(true);
-    }
-    for cancel in active_model_plans.lock().await.values() {
-        let _ = cancel.send(true);
-    }
-    for cancel in active_talks.lock().await.values() {
-        let _ = cancel.send(true);
-    }
-    for cancel in active_asrs.lock().await.values() {
-        let _ = cancel.send(true);
-    }
-    for cancel in active_ocrs.lock().await.values() {
-        let _ = cancel.send(true);
-    }
-    for cancel in active_tools.lock().await.values() {
-        let _ = cancel.send(true);
-    }
+    cancel_active_requests(&[
+        &active_graphs,
+        &active_chats,
+        &active_model_plans,
+        &active_talks,
+        &active_asrs,
+        &active_ocrs,
+        &active_tools,
+    ])
+    .await;
     live_asr.cancel_all().await;
     let stopped_gracefully = tokio::time::timeout(Duration::from_secs(2), async {
         while request_tasks.join_next().await.is_some() {}
@@ -727,6 +729,14 @@ async fn connect_and_serve<R: Runtime>(
         let _ = writer.await;
     }
     result
+}
+
+async fn cancel_active_requests(groups: &[&ActiveGraphJobs]) {
+    for group in groups {
+        for cancel in group.lock().await.values() {
+            let _ = cancel.send(true);
+        }
+    }
 }
 
 fn is_live_asr_control(text: &str) -> bool {
@@ -829,6 +839,7 @@ struct ServerMessageContext<'a, R: Runtime> {
     app: &'a AppHandle<R>,
     out_tx: &'a mpsc::UnboundedSender<Message>,
     active_graphs: &'a ActiveGraphJobs,
+    active_chats: &'a ActiveChatJobs,
     active_model_plans: &'a ActiveModelPlans,
     active_asrs: &'a ActiveAsrJobs,
     active_tools: &'a ActiveToolJobs,
@@ -845,6 +856,7 @@ async fn handle_server_message<R: Runtime>(
         app,
         out_tx,
         active_graphs,
+        active_chats,
         active_model_plans,
         active_asrs,
         active_tools,
@@ -988,44 +1000,8 @@ async fn handle_server_message<R: Runtime>(
                 }),
             );
         }
-        ServerMessage::ChatRequest {
-            chat_id,
-            client_id,
-            request,
-        } => {
-            let _work_permit = work_gate.acquire("relay", &chat_id).await;
-            emit(
-                app,
-                "node:job",
-                serde_json::json!({
-                    "job_id": chat_id, "kind": "text", "state": "started",
-                    "client_id": client_id,
-                    "prompt": request.messages.last().map(|message| message.content.clone()).unwrap_or_default(),
-                    "model": request.model,
-                }),
-            );
-
-            let result_msg = match run_chat(&request).await {
-                Ok(response) => AgentMessage::ChatResponse {
-                    chat_id: chat_id.clone(),
-                    response,
-                    tokens_generated: None,
-                },
-                Err(e) => AgentMessage::ChatError {
-                    chat_id: chat_id.clone(),
-                    error: e.to_string(),
-                },
-            };
-
-            let ok = matches!(&result_msg, AgentMessage::ChatResponse { .. });
-            out_tx.send(Message::Text(serde_json::to_string(&result_msg)?.into()))?;
-            emit(
-                app,
-                "node:job",
-                serde_json::json!({
-                    "job_id": chat_id, "kind": "text", "state": if ok { "done" } else { "failed" },
-                }),
-            );
+        chat_message @ (ServerMessage::ChatRequest { .. } | ServerMessage::ChatCancel { .. }) => {
+            handle_chat_server_message(app, out_tx, active_chats, work_gate, chat_message).await?;
         }
         ServerMessage::AsrRequest {
             asr_id,
@@ -1586,8 +1562,74 @@ async fn run_asr(
     mererun::transcribe_speech(req, &dir, asr_id, cancel).await
 }
 
-async fn run_chat(req: &ChatRequest) -> Result<String> {
-    mererun::chat_text(req).await
+async fn handle_chat_server_message<R: Runtime>(
+    app: &AppHandle<R>,
+    out_tx: &mpsc::UnboundedSender<Message>,
+    active_chats: &ActiveChatJobs,
+    work_gate: &DeviceWorkGate,
+    message: ServerMessage,
+) -> Result<()> {
+    match message {
+        ServerMessage::ChatRequest {
+            chat_id,
+            client_id,
+            request,
+        } => {
+            let _work_permit = work_gate.acquire("relay", &chat_id).await;
+            let (cancel_tx, cancel_rx) = watch::channel(false);
+            active_chats.lock().await.insert(chat_id.clone(), cancel_tx);
+            emit(
+                app,
+                "node:job",
+                serde_json::json!({
+                    "job_id": chat_id, "kind": "text", "state": "started",
+                    "client_id": client_id,
+                    "model": request.model,
+                }),
+            );
+
+            let result_msg = match run_chat(&request, cancel_rx).await {
+                Ok(response) => AgentMessage::ChatResponse {
+                    chat_id: chat_id.clone(),
+                    response,
+                    tokens_generated: None,
+                },
+                Err(error) => AgentMessage::ChatError {
+                    chat_id: chat_id.clone(),
+                    error: error.to_string(),
+                },
+            };
+            active_chats.lock().await.remove(&chat_id);
+
+            let ok = matches!(&result_msg, AgentMessage::ChatResponse { .. });
+            out_tx.send(Message::Text(serde_json::to_string(&result_msg)?.into()))?;
+            emit(
+                app,
+                "node:job",
+                serde_json::json!({
+                    "job_id": chat_id, "kind": "text", "state": if ok { "done" } else { "failed" },
+                }),
+            );
+        }
+        ServerMessage::ChatCancel { chat_id } => {
+            if let Some(cancel) = active_chats.lock().await.get(&chat_id) {
+                let _ = cancel.send(true);
+            }
+            emit(
+                app,
+                "node:log",
+                serde_json::json!({
+                    "level": "info", "message": format!("Chat cancel requested for {chat_id}")
+                }),
+            );
+        }
+        _ => unreachable!("chat handler received a non-chat message"),
+    }
+    Ok(())
+}
+
+async fn run_chat(req: &ChatRequest, cancel: watch::Receiver<bool>) -> Result<String> {
+    mererun::chat_text(req, cancel).await
 }
 
 struct TalkExecutionContext<'a, R: Runtime> {
@@ -1946,8 +1988,16 @@ mod tests {
             capabilities: vec!["usd".to_string()],
         };
 
-        let inventory =
-            assemble_inventory(fallback, None, Some(vec![plugin]), None, None, None, None);
+        let inventory = assemble_inventory(
+            fallback,
+            None,
+            Some(vec![plugin]),
+            None,
+            None,
+            None,
+            None,
+            vec![],
+        );
 
         assert_eq!(
             inventory.capabilities.models,

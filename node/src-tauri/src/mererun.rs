@@ -6,7 +6,10 @@
 
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
-use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -17,6 +20,7 @@ use crate::protocol::{
     AsrBackend, AsrOutput, AsrRequest, AsrSentenceAlignment, AsrSpeakerSegment,
     AsrStreamingCapabilities, ChatMessage, ChatRequest, EmbedDataRow, EmbedOutput, EmbedRequest,
     JobKind, JobRequest, ModelInventoryStatus, OcrRequest, RuntimeDiagnostic, TalkRequest,
+    TextAdapterCapability, TextAdapterReference,
 };
 
 const DEFAULT_MODEL: &str = "image-klein-9b";
@@ -54,6 +58,196 @@ const ADVERTISABLE_MODEL_PREFIXES: &[&str] = &[
 ];
 const MAX_ASR_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_OCR_DOWNLOAD_BYTES: u64 = 10 * 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+struct LocalAdapterManifest {
+    #[serde(alias = "base_model_id")]
+    base_model_alias: String,
+    #[serde(default)]
+    files: Vec<LocalAdapterFile>,
+    #[serde(default)]
+    weights_sha256: Option<String>,
+    #[serde(default)]
+    weights_file: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct LocalAdapterFile {
+    path: String,
+    role: String,
+    sha256: String,
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn text_adapter_root() -> Option<PathBuf> {
+    std::env::var_os("MERE_RUN_ADAPTER_ROOT").map(PathBuf::from)
+}
+
+fn file_sha256(path: &Path) -> Result<String> {
+    let mut file = File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn require_confined_regular_file(root: &Path, path: &Path, code: &str) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(anyhow!(
+            "{code}: adapter file must be a regular non-symlink"
+        ));
+    }
+    let canonical_root = root.canonicalize()?;
+    let canonical_path = path.canonicalize()?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(anyhow!("{code}: adapter file escapes the configured root"));
+    }
+    Ok(())
+}
+
+fn declared_adapter_path(adapter_dir: &Path, relative: &str) -> Result<PathBuf> {
+    let path = Path::new(relative);
+    if relative.is_empty()
+        || relative.contains('\\')
+        || path.is_absolute()
+        || !path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(anyhow!(
+            "ADAPTER_MANIFEST_INVALID: invalid file declaration"
+        ));
+    }
+    let declared = adapter_dir.join(path);
+    require_confined_regular_file(adapter_dir, &declared, "ADAPTER_MANIFEST_INVALID")?;
+    Ok(declared)
+}
+
+fn read_adapter_manifest_from_root(
+    root: &Path,
+    manifest_sha256: &str,
+) -> Result<(LocalAdapterManifest, PathBuf)> {
+    if !valid_sha256(manifest_sha256) {
+        return Err(anyhow!(
+            "ADAPTER_DIGEST_INVALID: manifest digest must be lowercase SHA-256"
+        ));
+    }
+    let adapter_dir = root.join(manifest_sha256);
+    let adapter_metadata = std::fs::symlink_metadata(&adapter_dir)?;
+    if adapter_metadata.file_type().is_symlink() || !adapter_metadata.is_dir() {
+        return Err(anyhow!(
+            "ADAPTER_MANIFEST_INVALID: adapter directory must be confined"
+        ));
+    }
+    let manifest_path = adapter_dir.join("manifest.json");
+    require_confined_regular_file(&adapter_dir, &manifest_path, "ADAPTER_MANIFEST_INVALID")?;
+    if file_sha256(&manifest_path)? != manifest_sha256 {
+        return Err(anyhow!(
+            "ADAPTER_MANIFEST_MISMATCH: manifest digest verification failed"
+        ));
+    }
+    let manifest: LocalAdapterManifest = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    for file in &manifest.files {
+        if !valid_sha256(&file.sha256) {
+            return Err(anyhow!(
+                "ADAPTER_MANIFEST_INVALID: invalid file declaration"
+            ));
+        }
+        let declared_path = declared_adapter_path(&adapter_dir, &file.path)?;
+        if file_sha256(&declared_path)? != file.sha256 {
+            return Err(anyhow!(
+                "ADAPTER_FILE_MISMATCH: declared file digest verification failed"
+            ));
+        }
+    }
+    Ok((manifest, adapter_dir))
+}
+
+fn resolve_text_adapter_from_root(
+    root: &Path,
+    reference: &TextAdapterReference,
+) -> Result<PathBuf> {
+    let (manifest, adapter_dir) =
+        read_adapter_manifest_from_root(root, &reference.manifest_sha256)?;
+    if manifest.base_model_alias != reference.base_model_id {
+        return Err(anyhow!(
+            "ADAPTER_BASE_MODEL_MISMATCH: requested base model does not match manifest"
+        ));
+    }
+    let weights = manifest.files.iter().find(|file| file.role == "weights");
+    let (weights_file, weights_sha256) = if let Some(weights) = weights {
+        (weights.path.as_str(), weights.sha256.as_str())
+    } else if let (Some(path), Some(digest)) = (
+        manifest.weights_file.as_deref(),
+        manifest.weights_sha256.as_deref(),
+    ) {
+        (path, digest)
+    } else {
+        return Err(anyhow!(
+            "ADAPTER_MANIFEST_INVALID: weights declaration is missing"
+        ));
+    };
+    if !valid_sha256(weights_sha256) {
+        return Err(anyhow!(
+            "ADAPTER_MANIFEST_INVALID: invalid weights declaration"
+        ));
+    }
+    let weights_path = declared_adapter_path(&adapter_dir, weights_file)?;
+    if file_sha256(&weights_path)? != weights_sha256 {
+        return Err(anyhow!(
+            "ADAPTER_WEIGHTS_MISMATCH: weights digest verification failed"
+        ));
+    }
+    Ok(weights_path)
+}
+
+fn resolve_text_adapter(reference: &TextAdapterReference) -> Result<PathBuf> {
+    let root = text_adapter_root().ok_or_else(|| {
+        anyhow!("ADAPTER_ROOT_UNAVAILABLE: MERE_RUN_ADAPTER_ROOT is not configured")
+    })?;
+    resolve_text_adapter_from_root(&root, reference)
+}
+
+pub fn text_adapter_capabilities() -> Vec<TextAdapterCapability> {
+    let Some(root) = text_adapter_root() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut adapters = entries
+        .flatten()
+        .filter_map(|entry| {
+            let digest = entry.file_name().to_string_lossy().to_string();
+            let (manifest, _) = read_adapter_manifest_from_root(&root, &digest).ok()?;
+            let reference = TextAdapterReference {
+                manifest_sha256: digest.clone(),
+                base_model_id: manifest.base_model_alias.clone(),
+                scale: None,
+            };
+            resolve_text_adapter_from_root(&root, &reference).ok()?;
+            Some(TextAdapterCapability {
+                manifest_sha256: digest,
+                base_model_id: manifest.base_model_alias,
+            })
+        })
+        .collect::<Vec<_>>();
+    adapters.sort_by(|left, right| left.manifest_sha256.cmp(&right.manifest_sha256));
+    adapters
+}
 
 fn push_unique(models: &mut Vec<String>, model: impl Into<String>) {
     let model = model.into();
@@ -1264,10 +1458,10 @@ pub async fn embed_texts(req: &EmbedRequest) -> Result<EmbedOutput> {
     parse_embed_output(&stdout, &req.model)
 }
 
-pub async fn chat_text(req: &ChatRequest) -> Result<String> {
+pub async fn chat_text(req: &ChatRequest, cancel: watch::Receiver<bool>) -> Result<String> {
     let args = build_chat_args(req)?;
-    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let output = mere_run_output(&arg_refs).await?;
+    let binary = resolve_mere_run_binary().await;
+    let output = cancellable_command_output(&binary, &args, cancel, "text chat cancelled").await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!("mere.run text chat failed: {}", stderr.trim()));
@@ -1281,7 +1475,11 @@ pub async fn chat_text(req: &ChatRequest) -> Result<String> {
 }
 
 fn build_chat_args(req: &ChatRequest) -> Result<Vec<String>> {
-    let _use_lora_requested = req.use_lora.unwrap_or(false);
+    if req.use_lora.unwrap_or(false) && req.adapter.is_none() {
+        return Err(anyhow!(
+            "ADAPTER_REFERENCE_REQUIRED: use_lora requires an exact adapter reference"
+        ));
+    }
     let (system, prompt) = render_chat_prompt(&req.messages, req.requires_json.unwrap_or(false))?;
     let mut args = vec![
         "text".to_string(),
@@ -1295,11 +1493,39 @@ fn build_chat_args(req: &ChatRequest) -> Result<Vec<String>> {
         args.push("--system".to_string());
         args.push(system);
     }
-    if let Some(model) = req.model.as_deref() {
-        if !model.trim().is_empty() {
-            args.push("--model".to_string());
-            args.push(model.to_string());
+    let requested_model = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let selected_model = if let Some(adapter) = &req.adapter {
+        if requested_model.is_some_and(|model| model != adapter.base_model_id) {
+            return Err(anyhow!(
+                "ADAPTER_BASE_MODEL_MISMATCH: requested model does not match adapter base model"
+            ));
         }
+        Some(adapter.base_model_id.as_str())
+    } else {
+        requested_model
+    };
+    if let Some(model) = selected_model {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    if let Some(adapter) = &req.adapter {
+        if adapter
+            .scale
+            .is_some_and(|scale| !(0.0..=4.0).contains(&scale) || scale == 0.0)
+        {
+            return Err(anyhow!(
+                "ADAPTER_SCALE_INVALID: adapter scale must be greater than zero and at most four"
+            ));
+        }
+        let weights_path = resolve_text_adapter(adapter)?;
+        args.push("--lora".to_string());
+        args.push(weights_path.to_string_lossy().to_string());
+        args.push("--lora-scale".to_string());
+        args.push(adapter.scale.unwrap_or(1.0).to_string());
     }
     if let Some(max_tokens) = req.max_tokens {
         if max_tokens > 0 {
@@ -2393,6 +2619,7 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
             temperature: Some(0.2),
             requires_json: Some(true),
             use_lora: None,
+            adapter: None,
             model: Some("text-chat-gemma4-turbo".to_string()),
         };
         let args = build_chat_args(&req).unwrap();
@@ -2414,6 +2641,110 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
                 "0.2"
             ]
         );
+    }
+
+    #[test]
+    fn rejects_chat_adapter_with_a_different_requested_base_model() {
+        let req = ChatRequest {
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                image_url: None,
+            }],
+            max_tokens: None,
+            temperature: None,
+            requires_json: None,
+            use_lora: Some(true),
+            adapter: Some(TextAdapterReference {
+                manifest_sha256: "a".repeat(64),
+                base_model_id: "text-chat-gemma4-turbo".to_string(),
+                scale: Some(1.0),
+            }),
+            model: Some("text-chat-other-model".to_string()),
+        };
+        let error = build_chat_args(&req).expect_err("mismatched model should fail closed");
+        assert!(error.to_string().contains("ADAPTER_BASE_MODEL_MISMATCH"));
+    }
+
+    #[test]
+    fn adapter_manifest_paths_allow_nested_files_but_reject_traversal() {
+        let root = std::env::temp_dir().join(format!(
+            "mere-run-node-adapter-paths-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let nested = root.join("weights").join("adapter.safetensors");
+        std::fs::create_dir_all(nested.parent().expect("nested parent"))
+            .expect("create nested adapter directory");
+        std::fs::write(&nested, b"weights").expect("write adapter weights");
+
+        assert_eq!(
+            declared_adapter_path(&root, "weights/adapter.safetensors")
+                .expect("nested path should be confined"),
+            nested
+        );
+        assert!(declared_adapter_path(&root, "../adapter.safetensors").is_err());
+        assert!(declared_adapter_path(&root, "/tmp/adapter.safetensors").is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exact_adapter_resolution_revalidates_manifest_model_and_weights() {
+        let root = std::env::temp_dir().join(format!(
+            "mere-run-node-adapter-resolution-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let weights = b"verified adapter weights";
+        let weights_sha256 = format!("{:x}", Sha256::digest(weights));
+        let manifest_bytes = serde_json::to_vec(&serde_json::json!({
+            "base_model_alias": "text-chat-gemma4-turbo",
+            "files": [{
+                "path": "weights/adapter.safetensors",
+                "role": "weights",
+                "sha256": weights_sha256
+            }]
+        }))
+        .expect("serialize adapter manifest");
+        let manifest_sha256 = format!("{:x}", Sha256::digest(&manifest_bytes));
+        let adapter_dir = root.join(&manifest_sha256);
+        let weights_path = adapter_dir.join("weights/adapter.safetensors");
+        std::fs::create_dir_all(weights_path.parent().expect("weights parent"))
+            .expect("create adapter directory");
+        std::fs::write(adapter_dir.join("manifest.json"), manifest_bytes)
+            .expect("write adapter manifest");
+        std::fs::write(&weights_path, weights).expect("write adapter weights");
+        let reference = TextAdapterReference {
+            manifest_sha256,
+            base_model_id: "text-chat-gemma4-turbo".to_string(),
+            scale: Some(0.8),
+        };
+
+        assert_eq!(
+            resolve_text_adapter_from_root(&root, &reference)
+                .expect("verified adapter should resolve"),
+            weights_path
+        );
+        let wrong_model = TextAdapterReference {
+            base_model_id: "text-chat-other-model".to_string(),
+            ..reference.clone()
+        };
+        assert!(resolve_text_adapter_from_root(&root, &wrong_model)
+            .expect_err("wrong model should fail")
+            .to_string()
+            .contains("ADAPTER_BASE_MODEL_MISMATCH"));
+        std::fs::write(&weights_path, b"tampered").expect("tamper adapter weights");
+        assert!(resolve_text_adapter_from_root(&root, &reference)
+            .expect_err("tampered weights should fail")
+            .to_string()
+            .contains("ADAPTER_FILE_MISMATCH"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -62,6 +62,7 @@ describe('relay browser auth', () => {
     const token = await new SignJWT({ email: 'operator@example.com', name: 'Relay Operator' })
       .setProtectedHeader({ alg: 'RS256', kid })
       .setIssuer(env.BROKER_ORIGIN)
+      .setAudience('mere-run-relay')
       .setSubject('user-relay-123')
       .setIssuedAt()
       .setExpirationTime('15m')

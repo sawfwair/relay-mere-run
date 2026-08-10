@@ -248,7 +248,11 @@ export const isStatusResponse: JsonGuard<StatusResponse> = (value): value is Sta
 export const isSubmitJobResponse: JsonGuard<SubmitJobResponse> = (value): value is SubmitJobResponse =>
   isSubmission(value, 'job_id') && isRecord(value) && isNumber(value.estimated_time_ms);
 export const isSubmitChatResponse: JsonGuard<SubmitChatResponse> = (value): value is SubmitChatResponse =>
-  isSubmission(value, 'chat_id');
+  isRecord(value)
+    && isString(value.chat_id)
+    && isOneOf(value.status, ['assigned', 'queued', 'complete', 'failed', 'cancelled'])
+    && isOptionalString(value.agent_id)
+    && isOptionalNumber(value.position);
 export const isSubmitTalkResponse: JsonGuard<SubmitTalkResponse> = (value): value is SubmitTalkResponse =>
   isSubmission(value, 'talk_id');
 export const isSubmitAsrResponse: JsonGuard<SubmitAsrResponse> = (value): value is SubmitAsrResponse =>
@@ -275,12 +279,22 @@ export const isChatStatusResponse: JsonGuard<ChatStatusResponse> = (value): valu
   if (!isRecord(value) || !hasCommonStatus(
     value,
     'chat_id',
-    ['queued', 'processing', 'complete', 'failed']
+    ['queued', 'processing', 'complete', 'failed', 'cancelled']
   )) return false;
   return Array.isArray(value.messages)
     && value.messages.every(isChatMessage)
     && isNullableString(value.response)
-    && (value.tokens_generated === null || isNumber(value.tokens_generated));
+    && (value.tokens_generated === null || isNumber(value.tokens_generated))
+    && (value.execution_receipt === undefined
+      || value.execution_receipt === null
+      || (isRecord(value.execution_receipt)
+        && value.execution_receipt.schema === 'relay.execution-receipt.v1'
+        && isString(value.execution_receipt.execution_id)
+        && isString(value.execution_receipt.request_sha256)
+        && isString(value.execution_receipt.model_id)
+        && isString(value.execution_receipt.provider_id)
+        && isOneOf(value.execution_receipt.state, ['complete', 'failed', 'cancelled'])
+        && isString(value.execution_receipt.completed_at)));
 };
 
 export const isTalkStatusResponse: JsonGuard<TalkStatusResponse> = (value): value is TalkStatusResponse => {
