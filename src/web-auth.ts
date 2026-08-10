@@ -3,7 +3,7 @@ import { authenticateClient, verifyBrokerToken } from './auth';
 import { readResponseJson } from './json';
 import { tokenResponseSchema } from './contracts/responses';
 
-const CLIENT_ID = 'mererun-relay';
+const CLIENT_ID = 'mere-run-relay';
 const ACCESS_COOKIE = 'mere_relay_access';
 const REFRESH_COOKIE = 'mere_relay_refresh';
 const STATE_COOKIE = 'mere_relay_oauth_state';

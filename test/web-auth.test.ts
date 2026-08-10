@@ -29,7 +29,7 @@ describe('relay browser auth', () => {
     expect(response.status).toBe(302);
     const location = new URL(response.headers.get('Location') ?? '');
     expect(location.origin + location.pathname).toBe(`${env.BROKER_ORIGIN}/oauth/authorize`);
-    expect(location.searchParams.get('client_id')).toBe('mererun-relay');
+    expect(location.searchParams.get('client_id')).toBe('mere-run-relay');
     expect(location.searchParams.get('redirect_uri')).toBe('https://relay.example/auth/callback');
     expect(location.searchParams.get('code_challenge_method')).toBe('S256');
     expect(location.searchParams.get('code_challenge')).toMatch(/^[A-Za-z0-9_-]{43}$/);
