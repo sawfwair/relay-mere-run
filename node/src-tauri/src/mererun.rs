@@ -1105,6 +1105,7 @@ fn build_video_generate_args(
 }
 
 pub async fn generate_video(req: &JobRequest, out_dir: &Path, job_id: &str) -> Result<PathBuf> {
+    validate_video_end_image(req)?;
     tokio::fs::create_dir_all(out_dir).await.ok();
     let out_path = out_dir.join(format!("{job_id}.mp4"));
     let model = req
@@ -1161,6 +1162,33 @@ pub async fn generate_video(req: &JobRequest, out_dir: &Path, job_id: &str) -> R
         ));
     }
     Ok(out_path)
+}
+
+fn validate_video_end_image(req: &JobRequest) -> Result<()> {
+    let has_start_image = req
+        .input_image_url
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || req
+            .input_image_data
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+
+    if req.end_image_url.is_some() && !has_start_image {
+        return Err(anyhow!(
+            "end_image_url requires input_image_url or input_image_data"
+        ));
+    }
+    if req.end_image_strength.is_some() && req.end_image_url.is_none() {
+        return Err(anyhow!("end_image_strength requires end_image_url"));
+    }
+    if let Some(strength) = req.end_image_strength {
+        if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
+            return Err(anyhow!("end_image_strength must be between 0 and 1"));
+        }
+    }
+
+    Ok(())
 }
 
 fn speech_synthesis_command(binary: &Path, req: &TalkRequest, output: &Path) -> Result<Command> {
@@ -2855,7 +2883,7 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
     }
 
     #[test]
-    fn ignores_end_keyframe_without_a_start_image() {
+    fn rejects_end_keyframe_without_a_start_image() {
         let req: JobRequest = serde_json::from_value(serde_json::json!({
             "kind": "video",
             "prompt": "no anchor here",
@@ -2864,19 +2892,48 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
             "end_image_url": "https://relay.example/frames/end.png"
         }))
         .unwrap();
-        let rendered: Vec<String> = build_video_generate_args(
-            &req,
-            "video-ltx23-av-mlx",
-            Path::new("/tmp/out.mp4"),
-            None,
-            Some(Path::new("/tmp/end.png")),
-            None,
-        )
-        .into_iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect();
-        assert!(!rendered.contains(&"--end-image".to_string()));
-        assert!(!rendered.contains(&"--image".to_string()));
+        assert_eq!(
+            validate_video_end_image(&req)
+                .expect_err("end keyframe without a start image must fail")
+                .to_string(),
+            "end_image_url requires input_image_url or input_image_data"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_end_keyframe_strength() {
+        let missing_end: JobRequest = serde_json::from_value(serde_json::json!({
+            "kind": "video",
+            "prompt": "missing end frame",
+            "width": 768,
+            "height": 512,
+            "input_image_url": "https://relay.example/frames/start.png",
+            "end_image_strength": 0.5
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_video_end_image(&missing_end)
+                .expect_err("strength without an end frame must fail")
+                .to_string(),
+            "end_image_strength requires end_image_url"
+        );
+
+        let out_of_range: JobRequest = serde_json::from_value(serde_json::json!({
+            "kind": "video",
+            "prompt": "invalid strength",
+            "width": 768,
+            "height": 512,
+            "input_image_url": "https://relay.example/frames/start.png",
+            "end_image_url": "https://relay.example/frames/end.png",
+            "end_image_strength": 1.1
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_video_end_image(&out_of_range)
+                .expect_err("out-of-range strength must fail")
+                .to_string(),
+            "end_image_strength must be between 0 and 1"
+        );
     }
 
     #[test]

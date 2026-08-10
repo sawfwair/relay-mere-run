@@ -20,6 +20,26 @@ function jsonRequest(userId: string, path: string, method: string, body?: unknow
 }
 
 describe('relay API edge cases', () => {
+  it('rejects end-keyframe conditioning outside the video lane', async () => {
+    const userId = `end-frame-${crypto.randomUUID()}`;
+    const relay = accountRelay(userId);
+    const response = await relay.fetch(jsonRequest(userId, '/internal/submit', 'POST', {
+      client_id: 'client',
+      kind: 'image',
+      prompt: 'this must not silently ignore the end frame',
+      input_image_url: 'https://assets.example/start.png',
+      end_image_url: 'https://assets.example/end.png',
+      end_image_strength: 0.75,
+    }));
+
+    expect(response.status).toBe(400);
+    await expect(readJson<JsonRecord>(response)).resolves.toMatchObject({
+      error: 'end_image_url is only supported for video jobs',
+    });
+    const status = await relay.fetch(jsonRequest(userId, '/internal/status', 'GET'));
+    await expect(readJson<JsonRecord>(status)).resolves.toMatchObject({ queue_depth: 0 });
+  });
+
   it('rejects every workload lane without a capable node and leaves no phantom queue entries', async () => {
     const userId = `queued-${crypto.randomUUID()}`;
     const relay = accountRelay(userId);

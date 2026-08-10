@@ -338,7 +338,8 @@ export interface JobRequest {
   audio_start_seconds?: number;
   audio_end_seconds?: number;
   // Optional end keyframe (video only): conditions the final frame. The agent
-  // downloads the URL and passes it as --end-image. Requires input_image_url.
+  // downloads the URL and passes it as --end-image. Requires a URL or inline
+  // start image; strength is bounded to the inclusive range 0...1.
   end_image_url?: string;
   end_image_strength?: number;
 }
@@ -973,6 +974,8 @@ export interface SubmitJobRequest {
   input_audio_url?: string;
   audio_start_seconds?: number;
   audio_end_seconds?: number;
+  // Optional end keyframe for video. Requires a URL or inline start image;
+  // strength is bounded to the inclusive range 0...1.
   end_image_url?: string;
   end_image_strength?: number;
 }
