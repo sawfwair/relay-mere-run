@@ -37,6 +37,38 @@ describe('runtime JSON contracts', () => {
     await expect(response?.json()).resolves.toMatchObject({ error: 'Invalid JSON payload' });
   });
 
+  it('validates end-keyframe requests without silently dropping conditioning', () => {
+    expect(submitJobRequestSchema.parse({
+      kind: 'video',
+      prompt: 'land on the final frame',
+      input_image_url: 'https://assets.example/start.png',
+      end_image_url: 'https://assets.example/end.png',
+      end_image_strength: 0.85,
+    })).toMatchObject({
+      end_image_url: 'https://assets.example/end.png',
+      end_image_strength: 0.85,
+    });
+
+    expect(() => submitJobRequestSchema.parse({
+      kind: 'video',
+      prompt: 'missing start frame',
+      end_image_url: 'https://assets.example/end.png',
+    })).toThrow(/requires input_image_url or input_image_data/u);
+    expect(() => submitJobRequestSchema.parse({
+      kind: 'video',
+      prompt: 'missing end frame',
+      input_image_url: 'https://assets.example/start.png',
+      end_image_strength: 0.5,
+    })).toThrow(/requires end_image_url/u);
+    expect(() => submitJobRequestSchema.parse({
+      kind: 'video',
+      prompt: 'invalid strength',
+      input_image_url: 'https://assets.example/start.png',
+      end_image_url: 'https://assets.example/end.png',
+      end_image_strength: 1.1,
+    })).toThrow();
+  });
+
   it('rejects malformed nested graph documents before queue state is touched', () => {
     expect(() => submitGraphJobRequestSchema.parse({
       job: { contract_version: 'mere.run/job-bundle.v1' },

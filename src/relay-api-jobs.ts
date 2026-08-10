@@ -37,6 +37,12 @@ export async function handleSubmitJob(
   const origin = request.relay_origin || 'https://relay.mere.run';
   const uploadUrl = generateUploadUrl(origin, userId, jobId);
   const kind = inferJobKind(request);
+  if (request.end_image_url && kind !== 'video') {
+    return Response.json(
+      { error: 'end_image_url is only supported for video jobs' },
+      { status: 400 }
+    );
+  }
   const fleetSettings = await getFleetSettings(ctx);
 
   const jobRequest: JobRequest = {
@@ -59,6 +65,8 @@ export async function handleSubmitJob(
     input_audio_url: request.input_audio_url,
     audio_start_seconds: request.audio_start_seconds,
     audio_end_seconds: request.audio_end_seconds,
+    end_image_url: request.end_image_url,
+    end_image_strength: request.end_image_strength,
   };
 
   const job: Job = {

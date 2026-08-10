@@ -11,7 +11,7 @@ import type {
 } from '../types';
 import { unknownRecordSchema } from './primitives';
 
-export const submitJobRequestSchema = z.object({
+const submitJobRequestObjectSchema = z.object({
   kind: z.enum(['image', 'music', 'video']).optional(),
   prompt: z.string(),
   negative_prompt: z.string().optional(),
@@ -31,7 +31,36 @@ export const submitJobRequestSchema = z.object({
   fps: z.number().optional(),
   num_frames: z.number().optional(),
   lyrics: z.string().optional(),
-}).passthrough() satisfies z.ZodType<SubmitJobRequest>;
+  end_image_url: z.string().trim().min(1).optional(),
+  end_image_strength: z.number().min(0).max(1).optional(),
+}).passthrough();
+
+function validateEndImageRequest(
+  request: Pick<
+    SubmitJobRequest,
+    'end_image_url' | 'end_image_strength' | 'input_image_url' | 'input_image_data'
+  >,
+  context: z.RefinementCtx
+): void {
+  const hasStartImage = Boolean(request.input_image_url?.trim() || request.input_image_data?.trim());
+  if (request.end_image_url && !hasStartImage) {
+    context.addIssue({
+      code: 'custom',
+      message: 'end_image_url requires input_image_url or input_image_data',
+      path: ['end_image_url'],
+    });
+  }
+  if (request.end_image_strength !== undefined && !request.end_image_url) {
+    context.addIssue({
+      code: 'custom',
+      message: 'end_image_strength requires end_image_url',
+      path: ['end_image_strength'],
+    });
+  }
+}
+
+export const submitJobRequestSchema = submitJobRequestObjectSchema
+  .superRefine(validateEndImageRequest) satisfies z.ZodType<SubmitJobRequest>;
 
 export const chatMessageSchema = z.object({
   role: z.enum(['system', 'user', 'assistant']),
@@ -125,10 +154,12 @@ export const asrStreamTicketRequestSchema = z.object({
   backend: z.enum(['auto', 'parakeet', 'qwen']).optional(),
 }).passthrough();
 
-export const submitJobInternalSchema = submitJobRequestSchema.extend({
-  client_id: z.string(),
-  relay_origin: z.string().optional(),
-});
+export const submitJobInternalSchema = submitJobRequestObjectSchema
+  .extend({
+    client_id: z.string(),
+    relay_origin: z.string().optional(),
+  })
+  .superRefine(validateEndImageRequest);
 export const submitChatInternalSchema = submitChatRequestSchema.extend({ client_id: z.string() });
 export const submitTalkInternalSchema = submitTalkRequestSchema.extend({
   client_id: z.string(),

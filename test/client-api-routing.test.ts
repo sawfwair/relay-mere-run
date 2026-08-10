@@ -106,7 +106,12 @@ describe('client API routing', () => {
     const { env, forwarded } = routingEnv();
     const submissions = [
       ['/generate', { prompt: 'image' }, '/internal/submit'],
-      ['/video', { prompt: 'video' }, '/internal/submit'],
+      ['/video', {
+        prompt: 'video',
+        input_image_url: 'https://assets.example/start.png',
+        end_image_url: 'https://assets.example/end.png',
+        end_image_strength: 0.8,
+      }, '/internal/submit'],
       ['/music', { prompt: 'music' }, '/internal/submit'],
       ['/chat', { messages: [{ role: 'user', content: 'hello' }] }, '/internal/chat/submit'],
       ['/tools/run', { command: 'inspect' }, '/internal/tool/submit'],
@@ -127,6 +132,8 @@ describe('client API routing', () => {
     expect(JSON.parse(forwarded[1]?.body ?? '{}')).toMatchObject({
       kind: 'video',
       model: 'video-ltx23-av-mlx',
+      end_image_url: 'https://assets.example/end.png',
+      end_image_strength: 0.8,
     });
     expect(JSON.parse(forwarded[2]?.body ?? '{}')).toMatchObject({
       kind: 'music',

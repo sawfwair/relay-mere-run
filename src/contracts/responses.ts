@@ -35,6 +35,8 @@ const jobRequestSchema = z.object({
   fps: z.number().optional(),
   num_frames: z.number().optional(),
   lyrics: z.string().optional(),
+  end_image_url: z.string().optional(),
+  end_image_strength: z.number().min(0).max(1).optional(),
 }).passthrough();
 
 const jobResultSchema = z.object({
