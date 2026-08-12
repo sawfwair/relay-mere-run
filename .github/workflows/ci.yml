@@ -23,7 +23,7 @@ jobs:
         with:
           node-version: 24
       - name: Set up pinned pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - name: Install Worker dependencies
         run: pnpm install --frozen-lockfile
       - name: Install node UI dependencies
@@ -101,7 +101,7 @@ jobs:
         with:
           node-version: 24
       - name: Set up pinned pnpm for Linux package build
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         if: runner.os == 'Linux'
       - name: Build Linux x86_64 packages
         if: runner.os == 'Linux'
