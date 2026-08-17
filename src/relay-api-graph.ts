@@ -62,22 +62,43 @@ const INPUT_TYPES = new Set([
   'asset_collection',
   'asset_array',
 ]);
+// The complete built-in catalog of mere.run 0.40.1, generated from
+// `mere.run graph catalog --json` (kind -> output names). Keep in sync
+// with the runtime's WorkflowNodeRegistry when the vocabulary grows;
+// placement still gates each job on the kinds a live worker advertises.
 const BUILTIN_NODE_OUTPUTS: Readonly<Record<string, readonly string[]>> = {
-  'text.value': ['text'],
-  'integer.value': ['value'],
-  'number.value': ['value'],
+  'audio.enhance': ['audio'],
   'boolean.value': ['value'],
-  'json.value': ['value'],
-  'seed.value': ['seed'],
   'choice.value': ['value'],
+  'image.describe': ['text'],
+  'image.generate': ['image'],
+  'image.train-lora': ['adapter'],
+  'integer.value': ['value'],
+  'json.value': ['value'],
+  'music.generate': ['audio'],
+  'music.separate': ['stems'],
+  'music.transcribe': ['transcription'],
+  'number.value': ['value'],
+  'seed.value': ['seed'],
+  'sfx.generate': ['audio'],
+  'speech.diarize': ['segments'],
+  'speech.synthesize': ['audio'],
+  'speech.transcribe': ['text'],
+  'text.anonymize': ['text'],
+  'text.embed': ['embeddings'],
+  'text.enhance': ['text'],
+  'text.generate': ['text'],
   'text.join': ['text'],
   'text.template': ['text'],
-  'text.enhance': ['text'],
-  'image.describe': ['text'],
-  'vision.ground': ['image', 'detections'],
-  'image.train-lora': ['adapter'],
-  'image.generate': ['image'],
+  'text.value': ['text'],
   'video.generate': ['video'],
+  'vision.caption': ['captions'],
+  'vision.geometry': ['geometry'],
+  'vision.ground': ['image', 'detections', 'masks'],
+  'vision.image-to-3d': ['mesh'],
+  'vision.ocr': ['text'],
+  'vision.segment': ['image', 'segments', 'masks'],
+  'vision.track': ['video', 'tracks', 'masks'],
 };
 const MAX_RETAINED_GRAPH_EVENTS = 512;
 const COALESCED_GRAPH_EVENT_TYPES = new Set(['node_progress', 'node_heartbeat']);
