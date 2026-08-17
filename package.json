@@ -19,7 +19,7 @@
   "scripts": {
     "build:web": "vite build --config web/vite.config.ts",
     "dev": "vite build --config web/vite.config.ts && wrangler dev",
-    "deploy": "vite build --config web/vite.config.ts && wrangler deploy",
+    "deploy": "node scripts/check-deploy-config.mjs \"${WRANGLER_CONFIG:-wrangler.toml}\" && vite build --config web/vite.config.ts && wrangler deploy --config \"${WRANGLER_CONFIG:-wrangler.toml}\"",
     "release:node:linux": "scripts/release-node-linux.sh",
     "release:node:macos": "scripts/release-node-macos.sh",
     "configure:main-protection": "scripts/configure-main-protection.sh sawfwair/relay-mere-run main --apply",
