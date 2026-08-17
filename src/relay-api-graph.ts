@@ -101,7 +101,10 @@ const BUILTIN_NODE_OUTPUTS: Readonly<Record<string, readonly string[]>> = {
   'vision.track': ['video', 'tracks', 'masks'],
 };
 const MAX_RETAINED_GRAPH_EVENTS = 512;
-const COALESCED_GRAPH_EVENT_TYPES = new Set(['node_progress', 'node_heartbeat']);
+// node_output_delta carries the node's accumulated text so far, so keeping
+// only the latest per node loses nothing and keeps retention bounded while
+// clients render live generation.
+const COALESCED_GRAPH_EVENT_TYPES = new Set(['node_progress', 'node_heartbeat', 'node_output_delta']);
 const BUNDLE_DOCUMENT_VALUES = {
   'job.json': 'job',
   'graph.json': 'graph',
