@@ -166,6 +166,7 @@ function relayDiscovery(env: Env): Response {
     graph_contract_versions: ['mere.run/job-bundle.v1'],
     auth: {
       issuer,
+      authorization_endpoint: `${issuer}/oauth/authorize`,
       device_authorization_endpoint: `${issuer}/oauth/device_authorization`,
       token_endpoint: `${issuer}/oauth/token`,
       client_id: 'mererun-node',
