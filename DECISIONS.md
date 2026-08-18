@@ -92,3 +92,16 @@ the ceiling, while regression fails the fast gate. Rust uses Clippy's cognitive
 complexity lint with warnings denied and a current ceiling of 45, which must be
 lowered as hotspots are decomposed. Complexity is a maintainability signal, not
 permission to change protocol semantics solely to improve a score.
+
+## Production deploys require a private Wrangler configuration
+
+The committed `wrangler.toml` intentionally carries placeholder identifiers
+(`identity.example.com`, a placeholder R2 bucket, localhost URLs) because this
+is the open-source distribution. Deploying it verbatim replaces the live
+Worker's environment with those placeholders and breaks relay authentication
+for every paired device — this happened on 2026-08-17 and was recovered with
+`wrangler rollback`. `pnpm run deploy` now runs
+`scripts/check-deploy-config.mjs`, which refuses any configuration that still
+contains placeholder markers; production deploys set `WRANGLER_CONFIG` to a
+private, uncommitted configuration (reconstructable from the live version via
+`wrangler versions view <id>`, which lists every var and binding).
