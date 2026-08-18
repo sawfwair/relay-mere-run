@@ -20,6 +20,7 @@ describe('relay broker authentication', () => {
       graph_contract_versions: ['mere.run/job-bundle.v1'],
       auth: {
         issuer: env.BROKER_ORIGIN,
+        authorization_endpoint: `${env.BROKER_ORIGIN}/oauth/authorize`,
         device_authorization_endpoint: `${env.BROKER_ORIGIN}/oauth/device_authorization`,
         token_endpoint: `${env.BROKER_ORIGIN}/oauth/token`,
         client_id: 'mererun-node',
