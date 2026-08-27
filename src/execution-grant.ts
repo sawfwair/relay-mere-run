@@ -2,9 +2,10 @@ import type { JWTPayload } from 'jose';
 import { z } from 'zod';
 import { graphRequestContent, sha256Json } from './execution';
 import { readResponseJson } from './json';
+import { chatExecutionAllowed, chatExecutionGrantSchema } from './chat-execution-grant';
 
 const identifier = z.string().min(1).max(160).regex(/^[A-Za-z0-9_.:-]+$/u);
-const grantSchema = z.object({
+const graphGrantSchema = z.object({
   version: z.literal(1),
   id: z.uuid(),
   executions: z.array(z.object({
@@ -16,15 +17,17 @@ const grantSchema = z.object({
   }).strict()).min(1).max(8),
 }).strict();
 
+const grantSchema = z.discriminatedUnion('version', [graphGrantSchema, chatExecutionGrantSchema]);
 export type RelayExecutionGrant = z.infer<typeof grantSchema>;
 
 /** A malformed restricted token must never fall back to account-wide access. */
 export function executionGrantFromClaims(payload: JWTPayload): RelayExecutionGrant | undefined {
   const scope = typeof payload.scope === 'string' ? payload.scope.split(/\s+/u) : [];
   const restricted = payload.token_use === 'relay_execution'
-    || payload.relay_execution_grant !== undefined || scope.includes('relay:graph-execution');
+    || payload.relay_execution_grant !== undefined
+    || scope.some((value) => ['relay:graph-execution', 'relay:chat-execution'].includes(value));
   if (!restricted) return undefined;
-  if (payload.token_use !== 'relay_execution' || payload.scope !== 'relay:graph-execution'
+  if (payload.token_use !== 'relay_execution'
     || typeof payload.client_id !== 'string' || !identifier.safeParse(payload.client_id).success
     || payload.azp !== payload.client_id
     || !Number.isSafeInteger(payload.iat) || !Number.isSafeInteger(payload.exp)
@@ -34,8 +37,11 @@ export function executionGrantFromClaims(payload: JWTPayload): RelayExecutionGra
     throw new Error('Invalid execution grant claims');
   }
   const grant = grantSchema.parse(payload.relay_execution_grant);
-  if (new Set(grant.executions.map((entry) => entry.job_id)).size !== grant.executions.length
-    || new Set(grant.executions.map((entry) => entry.idempotency_key)).size !== grant.executions.length) {
+  if (payload.scope !== (grant.version === 1 ? 'relay:graph-execution' : 'relay:chat-execution')) {
+    throw new Error('Execution grant scope does not match its kind');
+  }
+  if (grant.version === 1 && (new Set(grant.executions.map((entry) => entry.job_id)).size !== grant.executions.length
+    || new Set(grant.executions.map((entry) => entry.idempotency_key)).size !== grant.executions.length)) {
     throw new Error('Duplicate execution grant slots');
   }
   return grant;
@@ -52,7 +58,7 @@ const envelopeSchema = z.object({
   inputs: z.unknown(), assets: z.unknown(), bundle_documents: z.unknown().optional(),
 }).passthrough();
 
-async function submissionAllowed(request: Request, grant: RelayExecutionGrant): Promise<boolean> {
+async function submissionAllowed(request: Request, grant: z.infer<typeof graphGrantSchema>): Promise<boolean> {
   const text = await request.clone().text();
   if (text.length > 2_000_000) return false;
   let json: unknown;
@@ -73,6 +79,7 @@ export async function authorizeExecutionRequest(
   request: Request, path: string, grant: RelayExecutionGrant,
 ): Promise<Response | null> {
   if (!request.headers.get('Authorization')?.startsWith('Bearer ')) return denied();
+  if (grant.version === 2) return await chatExecutionAllowed(request, path, grant) ? null : denied();
   if (path === '/graph-jobs/capabilities' && request.method === 'GET') return null;
   if (path === '/graph-jobs' && request.method === 'POST') {
     return await submissionAllowed(request, grant) ? null : denied();
@@ -89,7 +96,12 @@ export async function authorizeExecutionRequest(
 // not disclose that execution through a restricted submission replay.
 export async function restrictExecutionResponse(response: Response, grant: RelayExecutionGrant): Promise<Response> {
   if (!response.ok) return response;
-  const body = await readResponseJson(response.clone(), z.object({ job_id: z.string() })).catch(() => null);
-  if (!body || !grant.executions.some((entry) => entry.job_id === body.job_id)) return denied();
+  const body = await readResponseJson(response.clone(), z.object({
+    job_id: z.string().optional(), chat_id: z.string().optional(),
+  })).catch(() => null);
+  const allowed = grant.version === 1
+    ? grant.executions.some((entry) => entry.job_id === body?.job_id)
+    : grant.executions[0].chat_id === body?.chat_id;
+  if (!allowed) return denied();
   return response;
 }
