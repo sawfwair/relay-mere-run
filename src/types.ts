@@ -1119,6 +1119,8 @@ export interface Chat {
   user_id: string;
   client_id: string;
   agent_id: string | null;
+  /** Assignment-time provenance; optional for pre-upgrade durable records. */
+  assigned_node?: { device_id: string; provider_version: string };
   status: 'queued' | 'processing' | 'complete' | 'failed' | 'cancelled';
   messages: ChatMessage[];
   max_tokens?: number;

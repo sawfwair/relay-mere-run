@@ -21,7 +21,7 @@
     "src/relay-queue.ts::Function 'graphCapabilityBlockers'": 30,
     "src/relay-queue.ts::Async function 'assignQueuedWork'": 25,
     "src/relay-routing.ts::Async function 'handleRelayFetchUnchecked'": 129,
-    "src/relay-websocket.ts::Async function 'handleRelayWebSocketMessage'": 40,
+    "src/relay-websocket.ts::Async function 'handleRelayWebSocketMessage'": 32,
     "web/src/App.tsx::Function 'NodeRow'": 47
   }
 }

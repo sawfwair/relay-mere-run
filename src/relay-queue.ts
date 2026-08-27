@@ -705,6 +705,10 @@ async function sendChatToAgent(
   try {
     agent.ws.send(JSON.stringify(message));
     chat.agent_id = agent.info.agent_id;
+    chat.assigned_node = {
+      device_id: agent.info.device_id,
+      provider_version: agent.info.runtime?.mere_run_version || agent.info.version,
+    };
     chat.status = 'processing';
     chat.started_at = new Date().toISOString();
     await ctx.saveChat(chat);

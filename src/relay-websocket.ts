@@ -37,8 +37,8 @@ export interface RelayWebSocketHandlers {
   handlePing(ws: WebSocket, msg: PingMessage): Promise<void>;
   handleInventoryUpdate(ws: WebSocket, msg: InventoryUpdateMessage): Promise<void>;
   handleAvailabilityUpdate(ws: WebSocket, msg: AvailabilityUpdateMessage): Promise<void>;
-  handleChatResponse(msg: ChatResponseMessage): Promise<void>;
-  handleChatError(msg: ChatErrorMessage): Promise<void>;
+  handleChatResponse(msg: ChatResponseMessage, agentId: string | null): Promise<void>;
+  handleChatError(msg: ChatErrorMessage, agentId: string | null): Promise<void>;
   handleTalkResponse(msg: TalkResponseMessage): Promise<void>;
   handleTalkError(msg: TalkErrorMessage): Promise<void>;
   handleAsrResponse(msg: AsrResponseMessage): Promise<void>;
@@ -69,10 +69,12 @@ export async function handleRelayWebSocketMessage(
   message: string | ArrayBuffer
 ): Promise<void> {
   if (typeof message !== 'string') return;
-  if (handlers.getAttachment(ws)?.superseded) return;
+  const attachment = handlers.getAttachment(ws);
+  if (attachment?.superseded) return;
 
   try {
     const msg = parseJson(message, agentMessageSchema);
+    const agentId = attachment?.agentId ?? null;
 
     switch (msg.type) {
       case 'auth':
@@ -94,10 +96,10 @@ export async function handleRelayWebSocketMessage(
         await handlers.handleAvailabilityUpdate(ws, msg);
         break;
       case 'chat_response':
-        await handlers.handleChatResponse(msg);
+        await handlers.handleChatResponse(msg, agentId);
         break;
       case 'chat_error':
-        await handlers.handleChatError(msg);
+        await handlers.handleChatError(msg, agentId);
         break;
       case 'talk_response':
         await handlers.handleTalkResponse(msg);
@@ -133,19 +135,19 @@ export async function handleRelayWebSocketMessage(
         await handlers.handleToolError(msg);
         break;
       case 'graph_event':
-        await handlers.handleGraphEvent(msg, handlers.getAttachment(ws)?.agentId ?? null);
+        await handlers.handleGraphEvent(msg, agentId);
         break;
       case 'graph_result':
-        await handlers.handleGraphResult(msg, handlers.getAttachment(ws)?.agentId ?? null);
+        await handlers.handleGraphResult(msg, agentId);
         break;
       case 'graph_error':
-        await handlers.handleGraphError(msg, handlers.getAttachment(ws)?.agentId ?? null);
+        await handlers.handleGraphError(msg, agentId);
         break;
       case 'model_plan_event':
-        await handlers.handleModelPlanEvent(msg, handlers.getAttachment(ws)?.agentId ?? null);
+        await handlers.handleModelPlanEvent(msg, agentId);
         break;
       case 'model_plan_result':
-        await handlers.handleModelPlanResult(msg, handlers.getAttachment(ws)?.agentId ?? null);
+        await handlers.handleModelPlanResult(msg, agentId);
         break;
       case 'asr_stream_event':
         await handlers.handleAsrStreamEvent(msg);

@@ -10,15 +10,14 @@ import { buildChatReceiptBase } from './relay-receipts';
 
 export async function handleChatResponse(
   ctx: RelayContext,
-  msg: ChatResponseMessage
+  msg: ChatResponseMessage,
+  agentId: string | null,
 ): Promise<void> {
   const chat = await ctx.getChat(msg.chat_id);
-  if (!chat) return;
-  if (chat.status === 'cancelled') {
-    console.log(`Ignoring late chat response for cancelled request ${msg.chat_id}`);
-    return;
-  }
+  if (!chat || chat.status !== 'processing' || !agentId || chat.agent_id !== agentId) return;
 
+  // Claim the terminal transition before hashing or persistence can yield.
+  // A duplicate reply, error, cancellation, or disconnect cannot replace it.
   chat.status = 'complete';
   chat.response = msg.response;
   chat.tokens_generated = msg.tokens_generated ?? null;
@@ -52,14 +51,11 @@ export async function handleChatResponse(
 
 export async function handleChatError(
   ctx: RelayContext,
-  msg: ChatErrorMessage
+  msg: ChatErrorMessage,
+  agentId: string | null,
 ): Promise<void> {
   const chat = await ctx.getChat(msg.chat_id);
-  if (!chat) return;
-  if (chat.status === 'cancelled') {
-    console.log(`Ignoring late chat error for cancelled request ${msg.chat_id}`);
-    return;
-  }
+  if (!chat || chat.status !== 'processing' || !agentId || chat.agent_id !== agentId) return;
 
   chat.status = 'failed';
   const errorCode = sanitizedTerminalError(msg.error);
