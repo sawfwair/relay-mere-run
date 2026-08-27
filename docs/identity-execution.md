@@ -31,11 +31,18 @@ digest; provider/catalog and device identity; timing; terminal state; output
 digest; and structured error code. A receipt never contains prompts, responses,
 source text, filesystem paths, credentials, or private logs.
 
+Only the authenticated node assigned to a processing chat may report its
+result or error. A queued chat cannot be completed, and terminal states and
+receipts are immutable: duplicate or contradictory node messages are ignored,
+including after the in-memory response has expired. This binding uses the
+authenticated WebSocket attachment, not an actor identifier in the payload.
+
 Runtime prompt and response text exists in the account Durable Object only
 until delivery. The durable queued copy is cleared when assigned, terminal
 content is retained in memory for bounded polling, and no chat text is written
-to R2. Graph R2 output is limited to explicitly declared artifacts; private
-providers should declare only sanitized receipt or report outputs.
+to R2. Private graph inputs additionally require the explicit
+[`local-custody.v1` policy](local-custody.md) and a compatible Node; merely
+declaring sanitized outputs does not protect inputs in the portable transport.
 
 ## Exact adapter execution
 

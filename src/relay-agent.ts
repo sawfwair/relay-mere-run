@@ -81,8 +81,8 @@ export function createRelayWebSocketHandlers(ctx: RelayContext): RelayWebSocketH
       handleInventoryUpdate(ctx, ws, msg),
     handleAvailabilityUpdate: (ws: WebSocket, msg: AvailabilityUpdateMessage) =>
       handleAvailabilityUpdate(ctx, ws, msg),
-    handleChatResponse: (msg: ChatResponseMessage) => handleChatResponse(ctx, msg),
-    handleChatError: (msg: ChatErrorMessage) => handleChatError(ctx, msg),
+    handleChatResponse: (msg: ChatResponseMessage, agentId: string | null) => handleChatResponse(ctx, msg, agentId),
+    handleChatError: (msg: ChatErrorMessage, agentId: string | null) => handleChatError(ctx, msg, agentId),
     handleTalkResponse: (msg: TalkResponseMessage) => handleTalkResponse(ctx, msg),
     handleTalkError: (msg: TalkErrorMessage) => handleTalkError(ctx, msg),
     handleAsrResponse: (msg: AsrResponseMessage) => handleAsrResponse(ctx, msg),
