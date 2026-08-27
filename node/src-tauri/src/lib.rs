@@ -3,6 +3,7 @@ mod asr_stream;
 mod config;
 mod deviceauth;
 mod graph;
+mod graph_custody;
 mod hardware;
 #[cfg(any(target_os = "linux", test))]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]

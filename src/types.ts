@@ -55,6 +55,7 @@ export interface GraphWorkerCapabilities {
   schema_version: number;
   worker_version: string;
   contract_versions: string[];
+  data_policies?: string[];
   platform: string;
   architecture: string;
   accelerator_backend: string;
@@ -531,6 +532,7 @@ export interface WorkflowJobManifest {
   identity?: IdentityExecutionReference;
   idempotency_key?: string;
   webhook_url?: string;
+  data_policy?: 'local-custody.v1';
 }
 
 export interface WorkflowAssetEntry {
@@ -614,6 +616,10 @@ export interface GraphJob {
   assigned_device_id?: string;
   webhook_url?: string | null;
   webhook_sent?: boolean;
+  /** Exact submitted documents, retained only until acknowledged delivery. */
+  bundle_documents?: Record<string, string>;
+  payload_redacted?: boolean;
+  payload_delivered_at?: string;
 }
 
 export interface GraphExecutionMetrics {
@@ -676,12 +682,16 @@ export interface GraphRequestMessage {
   owner_user_id: string;
   bundle_files: GraphBundleFile[];
   upload_url_base: string;
+  data_policy?: 'local-custody.v1';
+  request_sha256?: string;
+  assignment_token?: string;
 }
 
 export interface GraphEventMessage {
   type: 'graph_event';
   job_id: string;
   owner_user_id?: string;
+  assignment_token?: string;
   event: GraphRunEvent;
 }
 
@@ -689,6 +699,7 @@ export interface GraphResultMessage {
   type: 'graph_result';
   job_id: string;
   owner_user_id?: string;
+  assignment_token?: string;
   run_manifest: Record<string, unknown>;
   artifacts: GraphRunArtifact[];
   metrics?: GraphExecutionMetrics;
@@ -698,6 +709,7 @@ export interface GraphErrorMessage {
   type: 'graph_error';
   job_id: string;
   owner_user_id?: string;
+  assignment_token?: string;
   error: string;
 }
 

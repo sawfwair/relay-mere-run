@@ -39,6 +39,9 @@ import {
   verifiedGraphArtifactUpload,
 } from './relay-graph-storage';
 import { buildGraphReceipt } from './relay-receipts';
+import { custodyArtifactAllowed, custodyPayloadState, custodySubmissionError, hasLocalCustody, matchesCustodyAssignment,
+  restoreGraphPayload, sanitizedGraphEvent, sanitizedRunManifest } from './relay-graph-custody';
+import { handleCustodyNodeRequest } from './relay-graph-custody-http';
 import { graphRequestContent, sanitizedTerminalError, sha256Json } from './execution';
 
 const CONTRACT_VERSION = 'mere.run/job-bundle.v1';
@@ -162,6 +165,9 @@ function graphResponse(ctx: RelayContext, job: GraphJob): Record<string, unknown
   return {
     job_id: job.job_id,
     state: job.state,
+    request_sha256: job.request_sha256 ?? null,
+    execution_spec_sha256: job.job.execution_spec_sha256 ?? null,
+    ...(hasLocalCustody(job) ? { data_policy: job.job.data_policy, payload_state: custodyPayloadState(job) } : {}),
     agent_id: job.agent_id,
     created_at: job.created_at,
     updated_at: job.updated_at,
@@ -461,7 +467,7 @@ export function validateCreateRequest(body: SubmitGraphJobRequest): string | nul
     const group = body.assets.groups.find((candidate) => candidate.name === name);
     if (!group || group.kind !== definition.type) return `asset manifest is missing graph input: ${name}`;
   }
-  return null;
+  return custodySubmissionError(body);
 }
 
 export function handlePreflightGraphJob(ctx: RelayContext, body: SubmitGraphJobRequest): Response {
@@ -526,7 +532,7 @@ async function repeatedGraphSubmission(
     if (record) {
       const matches = record.request_sha256 === requestSha256;
       const original = matches ? await ctx.getGraphJob(record.job_id) : null;
-      if (original) return Response.json(graphResponse(ctx, original));
+      if (original) return recoverGraphReplay(ctx, original, body);
       return Response.json({
         error: 'Idempotency key was already used for a different graph request.',
         code: 'IDEMPOTENCY_CONFLICT',
@@ -536,12 +542,20 @@ async function repeatedGraphSubmission(
   const existing = await ctx.getGraphJob(body.job.job_id);
   if (!existing) return null;
   if (existing.request_sha256 === requestSha256) {
-    return Response.json(graphResponse(ctx, existing));
+    return recoverGraphReplay(ctx, existing, body);
   }
   return Response.json({
     error: 'Graph job id was already used for a different immutable bundle',
     code: 'IDEMPOTENCY_CONFLICT',
   }, { status: 409 });
+}
+
+async function recoverGraphReplay(ctx: RelayContext, job: GraphJob, body: SubmitGraphJobRequest): Promise<Response> {
+  if (restoreGraphPayload(job, body)) {
+    await ctx.saveGraphJob(job);
+    if (job.state === 'queued') await assignGraphToAgent(ctx, job);
+  }
+  return Response.json(graphResponse(ctx, job));
 }
 
 export async function handleCreateGraphJob(
@@ -590,6 +604,7 @@ export async function handleCreateGraphJob(
     webhook_url: body.job.webhook_url ?? null,
     webhook_sent: false,
     request_sha256: requestSha256,
+    ...(body.job.data_policy ? { bundle_documents: body.bundle_documents, max_attempts: 3 } : {}),
   };
   const bundleDocuments = decodeBundleDocuments(body);
   if (bundleDocuments) await storeSubmittedBundleDocuments(ctx, graph, bundleDocuments);
@@ -604,8 +619,7 @@ export async function handleCreateGraphJob(
   await recordGraphTelemetry(ctx, { submissions: 1 });
   await scheduleGraphMaintenance(ctx);
   return Response.json({
-    job_id: graph.job_id,
-    state: graph.state,
+    ...graphResponse(ctx, graph),
     missing_asset_digests: graph.missing_asset_digests,
   }, { status: 201 });
 }
@@ -619,6 +633,7 @@ export async function handleUploadGraphAsset(
   const job = await ctx.getGraphJob(jobId);
   if (!job) return Response.json({ error: 'Graph job not found' }, { status: 404 });
   if (job.state !== 'planned') return Response.json({ error: 'Graph job is already committed' }, { status: 409 });
+  if (hasLocalCustody(job)) return Response.json({ code: 'LOCAL_CUSTODY_ASSET_DENIED' }, { status: 403 });
   const declared = job.assets.groups.flatMap((group) => group.entries).find((entry) => entry.digest === digest);
   if (!declared) return Response.json({ error: 'Asset digest is not declared by this job' }, { status: 404 });
   const bytes = await request.arrayBuffer();
@@ -708,6 +723,7 @@ export async function handleCancelGraphJob(ctx: RelayContext, jobId: string): Pr
 export async function handleRetryGraphJob(ctx: RelayContext, jobId: string): Promise<Response> {
   const job = await ctx.getGraphJob(jobId);
   if (!job) return Response.json({ error: 'Graph job not found' }, { status: 404 });
+  if (hasLocalCustody(job)) return Response.json({ code: 'TERMINAL_RETRY_REQUIRES_NEW_EXECUTION' }, { status: 409 });
   if (!['failed', 'cancelled'].includes(job.state)) return Response.json({ error: 'Only failed or cancelled graph jobs can be retried' }, { status: 409 });
   if (job.state === 'cancelled' && job.agent_id) {
     return Response.json({ error: 'Graph cancellation is still settling on its worker' }, { status: 409 });
@@ -737,6 +753,8 @@ export async function handleGraphEvent(
 ): Promise<void> {
   const job = await ctx.getGraphJob(message.job_id);
   if (!job) return;
+  if (!matchesCustodyAssignment(job, message.assignment_token)) return;
+  if (hasLocalCustody(job)) message = { ...message, event: sanitizedGraphEvent(message.event) };
   if (agentId && job.agent_id !== agentId) return;
   if (['finished', 'failed', 'cancelled'].includes(job.state)) return;
   if (!Number.isSafeInteger(message.event.sequence)
@@ -747,10 +765,38 @@ export async function handleGraphEvent(
   if (message.event.sequence !== lastSequence + 1) return;
   retainGraphEvent(job, message.event);
   job.last_event_sequence = message.event.sequence;
-  job.state = ['finished', 'failed', 'cancelled'].includes(message.event.state) ? 'running' : message.event.state;
+  job.state = hasLocalCustody(job) || ['finished', 'failed', 'cancelled'].includes(message.event.state) ? 'running' : message.event.state;
   if (!job.started_at && message.event.state === 'running') job.started_at = message.event.created_at;
   job.updated_at = new Date().toISOString();
   await ctx.saveGraphJob(job);
+}
+
+function validArtifactMetadata(artifact: GraphRunArtifact): boolean {
+  return typeof artifact.name === 'string' && !!artifact.name && !artifact.name.includes('/')
+    && typeof artifact.kind === 'string' && !!artifact.kind
+    && typeof artifact.content_type === 'string' && !!artifact.content_type
+    && typeof artifact.path === 'string' && !artifact.path.includes('\\') && isConfinedPath(artifact.path)
+    && Number.isSafeInteger(artifact.size_bytes) && artifact.size_bytes >= 0
+    && DIGEST_PATTERN.test(artifact.sha256);
+}
+
+async function graphArtifactError(ctx: RelayContext, job: GraphJob, artifacts: GraphRunArtifact[]): Promise<string | null> {
+  const verifiedDigests = new Map<string, number>();
+  for (const artifact of artifacts) {
+    if (!validArtifactMetadata(artifact)) return `Invalid artifact metadata: ${artifact.name || 'unnamed'}`;
+    const verifiedSize = verifiedDigests.get(artifact.sha256);
+    if (verifiedSize !== undefined && verifiedSize !== artifact.size_bytes) return `Artifact aliases disagree on size: ${artifact.name}`;
+    if (verifiedSize === undefined && !await hasStoredGraphArtifact(ctx, job, artifact)) return `Missing or invalid uploaded artifact: ${artifact.name}`;
+    verifiedDigests.set(artifact.sha256, artifact.size_bytes);
+  }
+  return null;
+}
+
+async function graphResultTarget(ctx: RelayContext, job: GraphJob, token: string): Promise<GraphJob | null> {
+  if (!hasLocalCustody(job)) return job;
+  const current = await ctx.getGraphJob(job.job_id);
+  return current && current.node_token === token && current.agent_id && current.payload_delivered_at
+    && ['assigned', 'preflighting', 'running'].includes(current.state) ? current : null;
 }
 
 export async function handleGraphResult(
@@ -760,6 +806,8 @@ export async function handleGraphResult(
 ): Promise<void> {
   const job = await ctx.getGraphJob(message.job_id);
   if (!job) return;
+  if (!matchesCustodyAssignment(job, message.assignment_token)) return;
+  const assignmentToken = job.node_token;
   if (agentId && job.agent_id !== agentId) return;
   if (job.state === 'cancelled') {
     releaseAgent(ctx, job.agent_id);
@@ -769,53 +817,42 @@ export async function handleGraphResult(
     return;
   }
   if (job.state === 'finished' || job.state === 'failed') return;
+  const safeManifest = hasLocalCustody(job) ? sanitizedRunManifest(job, message.run_manifest) : message.run_manifest;
+  if (!safeManifest || (hasLocalCustody(job) && (!job.payload_delivered_at
+      || message.artifacts.some((artifact) => !custodyArtifactAllowed(job, artifact))))) {
+    await handleGraphError(ctx, { type: 'graph_error', job_id: job.job_id, assignment_token: assignmentToken,
+      error: 'LOCAL_CUSTODY_RESULT_INVALID' }, agentId);
+    return;
+  }
   const manifest: Record<string, unknown> = {
-    ...message.run_manifest,
+    ...safeManifest,
     attempt: job.attempt,
   };
   if (manifest.contract_version !== 'mere.run/graph-run.v1'
       || manifest.job_id !== job.job_id
       || manifest.graph_fingerprint !== job.job.graph_fingerprint
       || manifest.state !== 'finished') {
-    await handleGraphError(ctx, { type: 'graph_error', job_id: job.job_id, error: 'Worker returned an invalid graph run manifest' }, agentId);
+    await handleGraphError(ctx, { type: 'graph_error', job_id: job.job_id, assignment_token: assignmentToken,
+      error: 'Worker returned an invalid graph run manifest' }, agentId);
     return;
   }
   const names = new Set(message.artifacts.map((artifact) => artifact.name));
   if (names.size !== message.artifacts.length
       || job.job.outputs.some((output) => !message.artifacts.some((artifact) => artifact.name === output.name && artifact.kind === 'graph.output'))) {
-    await handleGraphError(ctx, { type: 'graph_error', job_id: job.job_id, error: 'Worker did not return every declared graph output' }, agentId);
+    await handleGraphError(ctx, { type: 'graph_error', job_id: job.job_id, assignment_token: assignmentToken,
+      error: 'Worker did not return every declared graph output' }, agentId);
     return;
   }
-  const verifiedDigests = new Map<string, number>();
-  for (const artifact of message.artifacts) {
-    if (typeof artifact.name !== 'string' || !artifact.name || artifact.name.includes('/')
-        || typeof artifact.kind !== 'string' || !artifact.kind
-        || typeof artifact.content_type !== 'string' || !artifact.content_type
-        || typeof artifact.path !== 'string' || artifact.path.includes('\\') || !isConfinedPath(artifact.path)
-        || !Number.isSafeInteger(artifact.size_bytes) || artifact.size_bytes < 0
-        || !DIGEST_PATTERN.test(artifact.sha256)) {
-      await handleGraphError(ctx, { type: 'graph_error', job_id: job.job_id, error: `Invalid artifact metadata: ${artifact.name || 'unnamed'}` });
-      return;
-    }
-    const verifiedSize = verifiedDigests.get(artifact.sha256);
-    if (verifiedSize !== undefined && verifiedSize !== artifact.size_bytes) {
-      await handleGraphError(ctx, { type: 'graph_error', job_id: job.job_id, error: `Artifact aliases disagree on size: ${artifact.name}` });
-      return;
-    }
-    if (verifiedSize === undefined && !await hasStoredGraphArtifact(ctx, job, artifact)) {
-      await handleGraphError(ctx, { type: 'graph_error', job_id: job.job_id, error: `Missing or invalid uploaded artifact: ${artifact.name}` });
-      return;
-    }
-    verifiedDigests.set(artifact.sha256, artifact.size_bytes);
+  const artifactError = await graphArtifactError(ctx, job, message.artifacts);
+  if (artifactError) {
+    await handleGraphError(ctx, { type: 'graph_error', job_id: job.job_id, assignment_token: assignmentToken,
+      error: artifactError }, agentId);
+    return;
   }
-  job.run_manifest = manifest;
-  job.artifacts = message.artifacts;
-  job.metrics = message.metrics ?? null;
-  job.state = 'finished';
-  job.error = null;
-  job.completed_at = new Date().toISOString();
-  job.updated_at = job.completed_at;
-  job.execution_receipt = await buildGraphReceipt(job, 'complete', job.completed_at, {
+  const completedAt = new Date().toISOString();
+  const completion = { run_manifest: manifest, artifacts: message.artifacts, metrics: message.metrics ?? null,
+    state: 'finished' as const, error: null, completed_at: completedAt, updated_at: completedAt };
+  const executionReceipt = await buildGraphReceipt({ ...job, ...completion }, 'complete', completedAt, {
     output: {
       run_manifest: manifest,
       artifacts: message.artifacts.map((artifact) => ({
@@ -825,16 +862,21 @@ export async function handleGraphResult(
       })),
     },
   });
-  releaseAgent(ctx, job.agent_id);
-  await ctx.env.IMAGES.put(
-    graphRunManifestKey(job.user_id, job.job_id),
+  // R2 verification and digest calculation yield. Never let a superseded
+  // result overwrite cancellation, a new assignment, or its terminal receipt.
+  const current = await graphResultTarget(ctx, job, assignmentToken);
+  if (!current) return;
+  Object.assign(current, completion, { execution_receipt: executionReceipt });
+  releaseAgent(ctx, current.agent_id);
+  if (!hasLocalCustody(current)) await ctx.env.IMAGES.put(
+    graphRunManifestKey(current.user_id, current.job_id),
     JSON.stringify(manifest),
     { httpMetadata: { contentType: 'application/json' } },
   );
-  await ctx.saveGraphJob(job);
-  requestAssignedNodeInventory(ctx, job.agent_id);
-  ctx.graphJobs.delete(job.job_id);
-  await ctx.scheduleGraphWebhookIfNeeded(job);
+  await ctx.saveGraphJob(current);
+  requestAssignedNodeInventory(ctx, current.agent_id);
+  ctx.graphJobs.delete(current.job_id);
+  await ctx.scheduleGraphWebhookIfNeeded(current);
   await ctx.assignQueuedWork();
 }
 
@@ -845,6 +887,7 @@ export async function handleGraphError(
 ): Promise<void> {
   const job = await ctx.getGraphJob(message.job_id);
   if (!job) return;
+  if (!matchesCustodyAssignment(job, message.assignment_token)) return;
   if (agentId && job.agent_id !== agentId) return;
   if (job.state === 'cancelled') {
     releaseAgent(ctx, job.agent_id);
@@ -877,6 +920,8 @@ export async function handleGraphNodeRequest(
 ): Promise<Response> {
   const job = await ctx.getGraphJob(jobId);
   if (!job || job.node_token !== token) return Response.json({ error: 'Graph node token is invalid' }, { status: 404 });
+  const custody = await handleCustodyNodeRequest(ctx, job, action, request);
+  if (custody) return custody;
   if (action.startsWith('bundle/') && request.method === 'GET') {
     const path = decodeURIComponent(action.slice('bundle/'.length));
     const object = await graphBundleObject(ctx, job, path);
@@ -912,10 +957,10 @@ export async function handleGraphNodeRequest(
     const path = request.headers.get('X-Artifact-Path') || name;
     const kind = request.headers.get('X-Artifact-Kind') || 'graph.output';
     const contentType = request.headers.get('Content-Type') || 'application/octet-stream';
-    if (!name || name.includes('/') || !isConfinedPath(path) || !Number.isSafeInteger(size) || size < 0 || !DIGEST_PATTERN.test(sha256)) {
+    const artifact: GraphRunArtifact = { name, kind, path, content_type: contentType, size_bytes: size, sha256 };
+    if (!validArtifactMetadata(artifact)) {
       return Response.json({ error: 'Invalid graph artifact metadata' }, { status: 400 });
     }
-    const artifact: GraphRunArtifact = { name, kind, path, content_type: contentType, size_bytes: size, sha256 };
     const quota = await enforceGraphArtifactQuota(ctx, job, sha256, size);
     if (quota) return quota;
     const partIndexHeader = request.headers.get('X-Artifact-Part-Index');
@@ -989,6 +1034,9 @@ export async function handleGraphTelemetry(ctx: RelayContext): Promise<Response>
 export async function handleGetGraphRunManifest(ctx: RelayContext, jobId: string): Promise<Response> {
   const job = await ctx.getGraphJob(jobId);
   if (!job) return Response.json({ error: 'Graph job not found' }, { status: 404 });
+  if (hasLocalCustody(job)) return job.run_manifest
+    ? Response.json(job.run_manifest, { headers: { 'Cache-Control': 'no-store' } })
+    : Response.json({ error: 'Run manifest not found' }, { status: 404 });
   const object = await ctx.env.IMAGES.get(graphRunManifestKey(job.user_id, job.job_id));
   return object ? new Response(object.body, { headers: { 'Content-Type': 'application/json' } }) : Response.json({ error: 'Run manifest not found' }, { status: 404 });
 }
@@ -1049,6 +1097,7 @@ export async function graphFleetCapabilities(ctx: RelayContext): Promise<GraphWo
     schema_version: 1,
     worker_version: workers.map((worker) => worker.worker_version).sort().at(-1) || 'unavailable',
     contract_versions: union((worker) => worker.contract_versions),
+    data_policies: union((worker) => worker.data_policies ?? []),
     platform: workers.length === 1 ? workers[0].platform : 'fleet',
     architecture: workers.length === 1 ? workers[0].architecture : 'mixed',
     accelerator_backend: workers.length === 1 ? workers[0].accelerator_backend : 'mixed',

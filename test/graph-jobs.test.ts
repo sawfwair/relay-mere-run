@@ -270,6 +270,7 @@ describe('portable graph jobs', () => {
       { env: testEnv } as unknown as RelayContext,
       {
         job_id: jobId,
+        job: (await graphFixture(new Uint8Array([1]))).body.job,
         user_id: userId,
         state: 'finished',
         artifacts: [artifact],
@@ -295,6 +296,7 @@ describe('portable graph jobs', () => {
       { env: testEnv } as unknown as RelayContext,
       {
         job_id: jobId,
+        job: (await graphFixture(new Uint8Array([1]))).body.job,
         user_id: userId,
         state: 'finished',
         artifacts: [{ ...artifact, sha256: unsafeDigest, size_bytes: unsafe.byteLength }],
@@ -574,7 +576,7 @@ describe('portable graph jobs', () => {
         body: JSON.stringify(fixture.body),
       }));
       expect(create.status).toBe(201);
-      expect(await readJson(create)).toEqual({
+      expect(await readJson(create)).toMatchObject({
         job_id: fixture.jobId,
         state: 'planned',
         missing_asset_digests: [fixture.digest],

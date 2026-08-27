@@ -5,6 +5,7 @@ import type {
   GraphRunArtifact,
 } from './types';
 import type { RelayContext } from './relay-context';
+import { hasLocalCustody } from './relay-graph-custody';
 
 const encoder = new TextEncoder();
 const BUNDLE_DOCUMENT_PATHS = ['job.json', 'graph.json', 'inputs.json', 'assets.json'] as const;
@@ -70,6 +71,7 @@ export async function storeSubmittedBundleDocuments(
   job: GraphJob,
   documents: Record<string, Uint8Array>,
 ): Promise<void> {
+  if (hasLocalCustody(job)) return;
   for (const path of BUNDLE_DOCUMENT_PATHS) {
     const bytes = documents[path];
     if (!bytes) throw new Error(`Missing graph bundle document: ${path}`);
@@ -105,7 +107,7 @@ export async function materializeRelayBundle(ctx: RelayContext, job: GraphJob): 
     'assets.json': job.assets,
   };
   const files = await Promise.all(BUNDLE_DOCUMENT_PATHS.map(async (path) => (
-    await existingBundleDocument(ctx, job, path)
+    hasLocalCustody(job) ? custodyBundleDocument(job, path, values[path]) : await existingBundleDocument(ctx, job, path)
       ?? storeBundleDocument(ctx, job, path, values[path])
   )));
   const entries = job.assets.groups.flatMap((group) => group.entries);
@@ -121,6 +123,18 @@ export async function materializeRelayBundle(ctx: RelayContext, job: GraphJob): 
   return files.sort((left, right) => left.path.localeCompare(right.path));
 }
 
+function custodyBundleBytes(job: GraphJob, path: string, value: unknown): Uint8Array {
+  if (job.payload_redacted) throw new Error('GRAPH_PAYLOAD_REPLAY_REQUIRED');
+  const encoded = job.bundle_documents?.[path];
+  return encoded ? Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0)) : encoder.encode(JSON.stringify(value));
+}
+
+async function custodyBundleDocument(job: GraphJob, path: string, value: unknown): Promise<GraphBundleFile> {
+  const bytes = custodyBundleBytes(job, path, value);
+  return { path, url: `${nodeBaseUrl(job)}/bundle/${encodeURIComponent(path)}`,
+    sha256: await sha256Hex(bytes), size_bytes: bytes.byteLength };
+}
+
 export function graphUploadUrlBase(job: GraphJob): string {
   return nodeBaseUrl(job);
 }
@@ -129,7 +143,13 @@ export async function graphBundleObject(
   ctx: RelayContext,
   job: GraphJob,
   path: string
-): Promise<R2ObjectBody | null> {
+): Promise<Pick<R2ObjectBody, 'body' | 'httpMetadata'> | null> {
+  if (hasLocalCustody(job)) {
+    if (job.payload_redacted) return null;
+    const values: Record<string, unknown> = { 'job.json': job.job, 'graph.json': job.graph, 'inputs.json': job.inputs, 'assets.json': job.assets };
+    if (!Object.prototype.hasOwnProperty.call(values, path)) return null;
+    return { body: new Response(custodyBundleBytes(job, path, values[path])).body!, httpMetadata: { contentType: 'application/json' } };
+  }
   if (path.startsWith('assets/sha256/')) {
     const digest = path.slice('assets/sha256/'.length);
     if (!/^[a-f0-9]{64}$/.test(digest)) return null;
@@ -147,7 +167,10 @@ export async function storeGraphArtifact(
   artifact: GraphRunArtifact,
   bytes: ArrayBuffer,
 ): Promise<void> {
-  await ctx.env.IMAGES.put(graphArtifactKey(job.user_id, job.job_id, artifact.name), bytes, {
+  // Content addressing prevents a late, superseded attempt from replacing
+  // the report bytes already named by a terminal receipt.
+  const objectName = hasLocalCustody(job) ? artifact.sha256 : artifact.name;
+  await ctx.env.IMAGES.put(graphArtifactKey(job.user_id, job.job_id, objectName), bytes, {
     httpMetadata: { contentType: artifact.content_type || 'application/octet-stream' },
     customMetadata: { sha256: artifact.sha256 },
   });
@@ -231,6 +254,7 @@ export async function hasStoredGraphArtifact(
 ): Promise<boolean> {
   const upload = job.artifact_uploads?.[artifact.sha256];
   if (!upload) {
+    if (hasLocalCustody(job)) return false;
     const legacy = await ctx.env.IMAGES.head(graphArtifactKey(job.user_id, job.job_id, artifact.name));
     return legacy?.size === artifact.size_bytes && legacy.customMetadata?.sha256 === artifact.sha256;
   }
@@ -249,6 +273,7 @@ export async function graphArtifactResponse(
 ): Promise<Response | null> {
   const upload = job.artifact_uploads?.[artifact.sha256];
   if (!upload) {
+    if (hasLocalCustody(job)) return null;
     const legacy = await ctx.env.IMAGES.get(graphArtifactKey(job.user_id, job.job_id, artifact.name));
     return legacy ? new Response(legacy.body, { headers: { 'Content-Type': artifact.content_type } }) : null;
   }

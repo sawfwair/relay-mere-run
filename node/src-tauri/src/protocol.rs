@@ -64,6 +64,8 @@ pub struct GraphWorkerCapabilities {
     pub schema_version: u32,
     pub worker_version: String,
     pub contract_versions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_policies: Vec<String>,
     pub platform: String,
     pub architecture: String,
     pub accelerator_backend: String,
@@ -373,12 +375,16 @@ pub enum AgentMessage {
         job_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         owner_user_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        assignment_token: Option<String>,
         event: Value,
     },
     GraphResult {
         job_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         owner_user_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        assignment_token: Option<String>,
         run_manifest: Value,
         artifacts: Vec<GraphRunArtifact>,
         metrics: GraphExecutionMetrics,
@@ -387,6 +393,8 @@ pub enum AgentMessage {
         job_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         owner_user_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        assignment_token: Option<String>,
         error: String,
     },
     ModelPlanEvent {
@@ -820,6 +828,12 @@ pub enum ServerMessage {
         owner_user_id: String,
         bundle_files: Vec<GraphBundleFile>,
         upload_url_base: String,
+        #[serde(default)]
+        data_policy: Option<String>,
+        #[serde(default)]
+        request_sha256: Option<String>,
+        #[serde(default)]
+        assignment_token: Option<String>,
     },
     Cancel {
         job_id: String,
@@ -870,6 +884,58 @@ pub enum ServerMessage {
 #[cfg(test)]
 mod inventory_tests {
     use super::*;
+
+    #[test]
+    fn private_graph_messages_preserve_assignment_binding() {
+        let token = "a".repeat(32);
+        let request = serde_json::json!({"type": "graph_request", "job_id": "job", "owner_user_id": "owner",
+            "bundle_files": [], "upload_url_base": "https://relay.example.test/upload", "data_policy": "local-custody.v1",
+            "request_sha256": "b".repeat(64), "assignment_token": token});
+        let message: ServerMessage =
+            serde_json::from_value(request.clone()).expect("private request");
+        let ServerMessage::GraphRequest {
+            assignment_token, ..
+        } = message
+        else {
+            panic!("expected graph request");
+        };
+        assert_eq!(assignment_token.as_deref(), Some(token.as_str()));
+        let event = AgentMessage::GraphEvent {
+            job_id: "job".into(),
+            owner_user_id: Some("owner".into()),
+            assignment_token: assignment_token.clone(),
+            event: serde_json::json!({"sequence": 0}),
+        };
+        let error = AgentMessage::GraphError {
+            job_id: "job".into(),
+            owner_user_id: Some("owner".into()),
+            assignment_token,
+            error: "GRAPH_EXECUTION_FAILED".into(),
+        };
+        for outbound in [event, error] {
+            assert_eq!(
+                serde_json::to_value(outbound).expect("message")["assignment_token"],
+                token
+            );
+        }
+        let mut legacy = request;
+        legacy
+            .as_object_mut()
+            .expect("object")
+            .remove("assignment_token");
+        legacy
+            .as_object_mut()
+            .expect("object")
+            .remove("data_policy");
+        let legacy: ServerMessage = serde_json::from_value(legacy).expect("legacy request");
+        assert!(matches!(
+            legacy,
+            ServerMessage::GraphRequest {
+                assignment_token: None,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn decodes_inventory_request() {

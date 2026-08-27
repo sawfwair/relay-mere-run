@@ -60,6 +60,7 @@ export const workflowJobManifestSchema = z.object({
   }).passthrough().optional(),
   idempotency_key: z.string().min(1).max(160).optional(),
   webhook_url: z.string().url().max(2048).optional(),
+  data_policy: z.literal('local-custody.v1').optional(),
 }).passthrough() satisfies z.ZodType<WorkflowJobManifest>;
 
 const workflowInputDefinitionSchema = z.object({
@@ -156,6 +157,7 @@ export const graphEventMessageSchema = z.object({
   type: z.literal('graph_event'),
   job_id: z.string(),
   owner_user_id: z.string().optional(),
+  assignment_token: z.string().regex(/^[a-f0-9]{32}$/u).optional(),
   event: graphRunEventSchema,
 }).passthrough() satisfies z.ZodType<GraphEventMessage>;
 
@@ -163,6 +165,7 @@ export const graphResultMessageSchema = z.object({
   type: z.literal('graph_result'),
   job_id: z.string(),
   owner_user_id: z.string().optional(),
+  assignment_token: z.string().regex(/^[a-f0-9]{32}$/u).optional(),
   run_manifest: unknownRecordSchema,
   artifacts: z.array(graphRunArtifactSchema),
   metrics: graphExecutionMetricsSchema.optional(),
@@ -172,6 +175,7 @@ export const graphErrorMessageSchema = z.object({
   type: z.literal('graph_error'),
   job_id: z.string(),
   owner_user_id: z.string().optional(),
+  assignment_token: z.string().regex(/^[a-f0-9]{32}$/u).optional(),
   error: z.string(),
 }).passthrough() satisfies z.ZodType<GraphErrorMessage>;
 
