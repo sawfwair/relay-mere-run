@@ -48,6 +48,99 @@ async function pinnedChat(relay: DurableObjectStub, userId: string, deviceId: st
 }
 
 describe('assignment-bound immutable chat receipts', () => {
+  it('retains assigned device and runtime provenance after the node disconnects', async () => {
+    const userId = `chat-disconnected-provenance-${crypto.randomUUID()}`;
+    const owner = await connectAgent(userId, pinnedCapabilities, {
+      deviceId: 'disconnected-owner',
+      runtime: { mere_run_version: '0.45.0', installed_models: [modelId] },
+    });
+    try {
+      const chatId = await pinnedChat(owner.relay, userId, 'disconnected-owner');
+      await waitForWebSocketJson(owner.ws);
+      closeWebSocket(owner.ws);
+      await vi.waitFor(async () => expect((await storedChat(owner.relay, chatId))?.status).toBe('failed'));
+      const persisted = await storedChat(owner.relay, chatId);
+      expect(persisted?.execution_receipt).toMatchObject({
+        state: 'failed', device_id: 'disconnected-owner', provider_version: '0.45.0',
+        model_id: modelId, adapter_manifest_sha256: manifestSha256,
+        execution_spec_sha256: 'b'.repeat(64),
+      });
+      expect(persisted?.execution_receipt?.started_at).not.toBeNull();
+      expect(persisted?.messages).toEqual([]);
+      expect(persisted?.response).toBeNull();
+      expect(JSON.stringify(persisted)).not.toContain('private assignment-bound prompt');
+    } finally {
+      closeWebSocket(owner.ws);
+    }
+  });
+
+  it('uses the runtime selected at assignment instead of a later inventory update', async () => {
+    const userId = `chat-updated-runtime-${crypto.randomUUID()}`;
+    const owner = await connectAgent(userId, pinnedCapabilities, {
+      deviceId: 'updated-runtime-owner',
+      runtime: { mere_run_version: '0.45.0', installed_models: [modelId] },
+    });
+    try {
+      const chatId = await pinnedChat(owner.relay, userId, 'updated-runtime-owner');
+      await waitForWebSocketJson(owner.ws);
+      owner.ws.send(JSON.stringify({
+        type: 'inventory_update', capabilities: pinnedCapabilities,
+        system: { platform: 'macos', architecture: 'aarch64', accelerators: [] },
+        runtime: { mere_run_version: '0.46.0', installed_models: [modelId] },
+        capacity: { max_concurrent_jobs: 1 },
+      }));
+      await messageBarrier(owner.ws);
+      owner.ws.send(JSON.stringify(terminalMessage('chat_response', chatId, 'assigned runtime output')));
+      await vi.waitFor(async () => expect((await storedChat(owner.relay, chatId))?.status).toBe('complete'));
+      expect((await storedChat(owner.relay, chatId))?.execution_receipt).toMatchObject({
+        state: 'complete', device_id: 'updated-runtime-owner', provider_version: '0.45.0',
+      });
+    } finally {
+      closeWebSocket(owner.ws);
+    }
+  });
+
+  it('keeps pre-upgrade durable assignments readable using available live provenance', async () => {
+    const userId = `chat-legacy-assignment-${crypto.randomUUID()}`;
+    const owner = await connectAgent(userId, pinnedCapabilities, { deviceId: 'legacy-owner' });
+    try {
+      const chatId = await pinnedChat(owner.relay, userId, 'legacy-owner');
+      await waitForWebSocketJson(owner.ws);
+      await runInDurableObject(owner.relay, async (instance, state) => {
+        const legacy = await state.storage.get<Chat>(`chat:${chatId}`);
+        if (!legacy) throw new Error('Expected persisted assignment');
+        delete legacy.assigned_node;
+        await state.storage.put(`chat:${chatId}`, legacy);
+        (instance as unknown as { chats: Map<string, Chat> }).chats.delete(chatId);
+      });
+      owner.ws.send(JSON.stringify(terminalMessage('chat_response', chatId, 'legacy assigned response')));
+      await vi.waitFor(async () => expect((await storedChat(owner.relay, chatId))?.status).toBe('complete'));
+      expect((await storedChat(owner.relay, chatId))?.execution_receipt).toMatchObject({
+        state: 'complete', device_id: 'legacy-owner', provider_version: '1.0.0',
+      });
+    } finally {
+      closeWebSocket(owner.ws);
+    }
+  });
+
+  it('does not invent an executing node for work cancelled before assignment', async () => {
+    const userId = `chat-unassigned-cancel-${crypto.randomUUID()}`;
+    const owner = await connectAgent(userId, pinnedCapabilities, { deviceId: 'busy-cancel-owner' });
+    try {
+      await pinnedChat(owner.relay, userId, 'busy-cancel-owner');
+      await waitForWebSocketJson(owner.ws);
+      const queuedId = await pinnedChat(owner.relay, userId, 'busy-cancel-owner');
+      expect((await statusFor(owner.relay, queuedId)).status).toBe('queued');
+      await owner.relay.fetch(new Request(`https://relay/internal/chat/${queuedId}`, { method: 'POST' }));
+      const receipt = (await storedChat(owner.relay, queuedId))?.execution_receipt;
+      expect(receipt).toMatchObject({ state: 'cancelled', started_at: null, error_code: 'EXECUTION_CANCELLED' });
+      expect(receipt).not.toHaveProperty('device_id');
+      expect(receipt).not.toHaveProperty('provider_version');
+    } finally {
+      closeWebSocket(owner.ws);
+    }
+  });
+
   it.each(['chat_response', 'chat_error'] as const)('rejects %s from another node in the same account', async (type) => {
     const userId = `chat-wrong-node-${crypto.randomUUID()}`;
     const owner = await connectAgent(userId, pinnedCapabilities, { deviceId: 'pinned-adapter-owner' });

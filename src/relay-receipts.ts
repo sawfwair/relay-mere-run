@@ -2,12 +2,26 @@ import { sha256Json, terminalErrorCode } from './execution';
 import type { RelayContext } from './relay-context';
 import type { Chat, GraphJob, RelayExecutionReceipt } from './types';
 
+function chatNodeProvenance(ctx: RelayContext, chat: Chat): Chat['assigned_node'] {
+  // Only legacy records need a live lookup. New assignments retain provenance
+  // after disconnects and cannot be relabelled by later inventory updates.
+  if (chat.assigned_node) return chat.assigned_node;
+  const legacyNode = chat.agent_id
+    ? ctx.getConnectedAgents().get(chat.agent_id)?.info
+    : undefined;
+  if (!legacyNode) return undefined;
+  return {
+    device_id: legacyNode.device_id,
+    provider_version: legacyNode.runtime?.mere_run_version || legacyNode.version,
+  };
+}
+
 export function buildChatReceiptBase(
   ctx: RelayContext,
   chat: Chat,
   completedAt: string,
 ): Omit<RelayExecutionReceipt, 'state'> {
-  const node = chat.agent_id ? ctx.getConnectedAgents().get(chat.agent_id)?.info : undefined;
+  const node = chatNodeProvenance(ctx, chat);
   const startedAt = chat.started_at;
   const duration = startedAt ? Math.max(0, Date.parse(completedAt) - Date.parse(startedAt)) : undefined;
   return {
@@ -18,11 +32,7 @@ export function buildChatReceiptBase(
     model_id: chat.model?.trim() || chat.adapter?.base_model_id || 'text',
     ...(chat.adapter ? { adapter_manifest_sha256: chat.adapter.manifest_sha256 } : {}),
     provider_id: 'mere.run',
-    ...(node?.runtime?.mere_run_version
-      ? { provider_version: node.runtime.mere_run_version }
-      : node?.version
-        ? { provider_version: node.version }
-        : {}),
+    ...(node?.provider_version ? { provider_version: node.provider_version } : {}),
     ...(node?.device_id ? { device_id: node.device_id } : {}),
     started_at: startedAt,
     completed_at: completedAt,

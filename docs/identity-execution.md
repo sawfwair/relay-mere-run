@@ -36,6 +36,9 @@ result or error. A queued chat cannot be completed, and terminal states and
 receipts are immutable: duplicate or contradictory node messages are ignored,
 including after the in-memory response has expired. This binding uses the
 authenticated WebSocket attachment, not an actor identifier in the payload.
+Device and runtime provenance is captured when the chat is assigned, so a
+disconnect or later inventory update cannot erase or relabel the receipt.
+Chats cancelled before assignment have no execution node or start time.
 
 Runtime prompt and response text exists in the account Durable Object only
 until delivery. The durable queued copy is cleared when assigned, terminal
