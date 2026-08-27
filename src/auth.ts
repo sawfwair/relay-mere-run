@@ -6,6 +6,7 @@ import {
   type JWTVerifyGetKey,
 } from 'jose';
 import type { Env, AuthResult } from './types';
+import { executionGrantFromClaims } from './execution-grant';
 
 // mere.world issues brokered access tokens as RS256 JWTs (better-auth jwt
 // plugin). We validate them statelessly against the broker's JWKS — no userinfo
@@ -90,12 +91,14 @@ export async function verifyBrokerToken(token: string, env: Env): Promise<AuthRe
       const { payload } = await jwtVerify(token, getJwks(env.BROKER_ORIGIN), {
         issuer: env.BROKER_ORIGIN,
         audience: 'mere-run-relay',
+        requiredClaims: ['sub', 'exp'],
       });
       if (typeof payload.sub === 'string' && payload.sub) {
         return {
           user_id: payload.sub,
           email: typeof payload.email === 'string' ? payload.email : undefined,
           name: typeof payload.name === 'string' ? payload.name : undefined,
+          execution_grant: executionGrantFromClaims(payload),
         };
       }
       return null;
@@ -130,7 +133,8 @@ async function authenticateBrokerToken(request: Request, env: Env): Promise<Auth
  * mere.world brokered token.
  */
 export async function authenticateAgent(request: Request, env: Env): Promise<AuthResult | null> {
-  return authenticateBrokerToken(request, env);
+  const auth = await authenticateBrokerToken(request, env);
+  return auth?.execution_grant ? null : auth;
 }
 
 /**

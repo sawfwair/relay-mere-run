@@ -39,7 +39,7 @@ import {
   verifiedGraphArtifactUpload,
 } from './relay-graph-storage';
 import { buildGraphReceipt } from './relay-receipts';
-import { sanitizedTerminalError, sha256Json } from './execution';
+import { graphRequestContent, sanitizedTerminalError, sha256Json } from './execution';
 
 const CONTRACT_VERSION = 'mere.run/job-bundle.v1';
 const GRAPH_KIND = 'mere.run/workflow-graph';
@@ -117,21 +117,6 @@ const MAX_ARTIFACT_PARTS = 16_384;
 interface GraphIdempotencyRecord {
   job_id: string;
   request_sha256: string;
-}
-
-function graphRequestContent(body: SubmitGraphJobRequest): unknown {
-  const job = Object.fromEntries(
-    Object.entries(body.job).filter(
-      ([key]) => !['job_id', 'created_at', 'idempotency_key'].includes(key),
-    ),
-  );
-  return {
-    job,
-    graph: body.graph,
-    inputs: body.inputs,
-    assets: body.assets,
-    bundle_documents: body.bundle_documents,
-  };
 }
 
 function jsonValuesEqual(left: unknown, right: unknown): boolean {

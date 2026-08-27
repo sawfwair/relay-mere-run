@@ -26,6 +26,15 @@ export async function sha256Json(value: unknown): Promise<string> {
   return sha256Text(canonicalJson(value));
 }
 
+export function graphRequestContent(body: {
+  job: object; graph: unknown; inputs: unknown; assets: unknown; bundle_documents?: unknown;
+}): unknown {
+  const job = Object.fromEntries(Object.entries(body.job).filter(
+    ([key]) => !['job_id', 'created_at', 'idempotency_key'].includes(key),
+  ));
+  return { job, graph: body.graph, inputs: body.inputs, assets: body.assets, bundle_documents: body.bundle_documents };
+}
+
 export function terminalErrorCode(error: string | null): string | null {
   if (!error) return null;
   const candidate = error.match(/\b[A-Z][A-Z0-9_]{2,63}\b/u)?.[0];
