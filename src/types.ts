@@ -1,3 +1,5 @@
+import type { RelayExecutionGrant } from './execution-grant';
+
 // Environment bindings
 export interface Env {
   MERE_RUN_RELAY: DurableObjectNamespace;
@@ -1058,6 +1060,7 @@ export interface AuthResult {
   user_id: string;
   email?: string;
   name?: string;
+  execution_grant?: RelayExecutionGrant;
 }
 
 // MARK: - Chat Types

@@ -1,7 +1,8 @@
 import { MereRunRelay } from './MereRunRelay';
 import { handleClientApi } from './client-api';
 import { authenticateAgent, authenticateClient } from './auth';
-import type { Env } from './types';
+import { authorizeExecutionRequest, restrictExecutionResponse } from './execution-grant';
+import type { AuthResult, Env } from './types';
 import { getClientApiPath } from './client-api';
 import { openAsrTicket } from './relay-asr-stream';
 import {
@@ -468,6 +469,17 @@ async function handleGraphNodeRequest(request: Request, env: Env, pathname: stri
   ));
 }
 
+async function handleAuthenticatedClientApi(request: Request, env: Env, path: string, auth: AuthResult): Promise<Response> {
+  if (auth.execution_grant) {
+    const denial = await authorizeExecutionRequest(request, path, auth.execution_grant);
+    if (denial) return denial;
+  }
+  const response = await handleClientApi(request, env, auth.user_id);
+  return auth.execution_grant && path === '/graph-jobs' && request.method === 'POST'
+    ? restrictExecutionResponse(response, auth.execution_grant)
+    : response;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -600,8 +612,7 @@ export default {
         );
       }
 
-      const response = await handleClientApi(request, env, auth.user_id);
-      return withCors(response);
+      return withCors(await handleAuthenticatedClientApi(request, env, clientApiPath, auth));
     }
 
     // Health check
