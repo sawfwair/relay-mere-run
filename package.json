@@ -63,7 +63,7 @@
     "typescript-eslint": "^8.39.1",
     "vite": "^7.0.4",
     "vitest": "^3.2.7",
-    "wrangler": "^4.72.0"
+    "wrangler": "^4.79.0"
   },
   "dependencies": {
     "jose": "^6.2.3",
