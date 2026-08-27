@@ -11,6 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
 
+use crate::graph_custody::{self, ExecutionPolicy};
 use crate::mererun;
 use crate::protocol::{
     GraphBundleFile, GraphExecutionMetrics, GraphRunArtifact, GraphWorkerCapabilities,
@@ -90,6 +91,7 @@ pub async fn probe() -> Option<GraphWorkerCapabilities> {
         _ => None,
     };
     capabilities.cached_asset_digests = cached_asset_digests().await;
+    capabilities.data_policies = vec![graph_custody::POLICY.to_string()];
     Some(capabilities)
 }
 
@@ -99,6 +101,7 @@ pub async fn execute(
     upload_url_base: &str,
     events: mpsc::UnboundedSender<Value>,
     cancel: watch::Receiver<bool>,
+    policy: ExecutionPolicy,
 ) -> Result<GraphRunOutput> {
     let binary = mererun::resolve_mere_run_binary().await;
     execute_with_runtime(
@@ -107,10 +110,20 @@ pub async fn execute(
         upload_url_base,
         events,
         cancel,
-        &binary,
-        &asset_cache_root(),
+        &policy,
+        GraphRuntime {
+            binary: &binary,
+            cache_root: &asset_cache_root(),
+            private_root: &graph_custody::private_root(),
+        },
     )
     .await
+}
+
+struct GraphRuntime<'a> {
+    binary: &'a Path,
+    cache_root: &'a Path,
+    private_root: &'a Path,
 }
 
 async fn execute_with_runtime(
@@ -119,18 +132,28 @@ async fn execute_with_runtime(
     upload_url_base: &str,
     events: mpsc::UnboundedSender<Value>,
     mut cancel: watch::Receiver<bool>,
-    binary: &Path,
-    cache_root: &Path,
+    policy: &ExecutionPolicy,
+    runtime: GraphRuntime<'_>,
 ) -> Result<GraphRunOutput> {
+    policy.validate()?;
+    policy.validate_delivery(bundle_files)?;
+    let binary = runtime.binary;
+    let cache_root = runtime.cache_root;
     let total_started = Instant::now();
     let graph_root = std::env::temp_dir().join("mere-run-node").join("graphs");
-    let (bundle_directory, run_directory) = prepare_job_layout(&graph_root, job_id).await?;
-    let _workspace_cleanup = GraphWorkspaceCleanup(
-        bundle_directory
-            .parent()
-            .ok_or_else(|| anyhow!("graph workspace has no root"))?
-            .to_path_buf(),
-    );
+    let (bundle_directory, run_directory) = if policy.is_private() {
+        graph_custody::prepare_private_layout(runtime.private_root, job_id).await?
+    } else {
+        prepare_job_layout(&graph_root, job_id).await?
+    };
+    let _workspace_cleanup = (!policy.is_private()).then(|| {
+        GraphWorkspaceCleanup(
+            bundle_directory
+                .parent()
+                .expect("prepared graph workspace has a root")
+                .to_path_buf(),
+        )
+    });
     validate_bundle_capacity(bundle_files, &bundle_directory)?;
 
     let client = relay_client()?;
@@ -138,6 +161,8 @@ async fn execute_with_runtime(
     let bundle_bytes_downloaded =
         download_bundle(&client, bundle_files, &bundle_directory, cache_root).await?;
     let download_ms = elapsed_milliseconds(download_started);
+    let job_manifest = policy.verify_bundle(&bundle_directory).await?;
+    policy.acknowledge(&client, upload_url_base).await?;
 
     let execution_started = Instant::now();
     let mut child = Command::new(binary)
@@ -178,13 +203,16 @@ async fn execute_with_runtime(
                 if line.trim().is_empty() { continue; }
                 let event = serde_json::from_str::<Value>(&line)
                     .with_context(|| format!("graph worker emitted invalid JSON: {line}"))?;
-                events.send(event).map_err(|_| anyhow!("graph event receiver closed"))?;
+                let public_event = if policy.is_private() { graph_custody::event(event) } else { event };
+                events.send(public_event).map_err(|_| anyhow!("graph event receiver closed"))?;
             }
             _ = wait_for_cancel(&mut cancel) => {
                 request_worker_cancel(binary, &run_directory).await;
                 let _ = child.start_kill();
                 let _ = child.wait().await;
-                let _ = stderr_reader.await;
+                if let Ok(Ok(stderr)) = stderr_reader.await {
+                    persist_private_stderr(policy, &run_directory, &stderr).await?;
+                }
                 return Err(anyhow!("graph job cancelled"));
             }
         }
@@ -194,6 +222,7 @@ async fn execute_with_runtime(
     let stderr = stderr_reader
         .await
         .map_err(|error| anyhow!("graph stderr task failed: {error}"))??;
+    persist_private_stderr(policy, &run_directory, &stderr).await?;
     if !status.success() {
         let diagnostic = stderr.trim();
         return Err(anyhow!(
@@ -214,15 +243,33 @@ async fn execute_with_runtime(
             .await
             .context("graph worker completed without run.json")?,
     )?;
-    normalize_manifest_paths(&run_directory, &mut run_manifest).await?;
-    let artifacts = collect_artifacts(&run_directory, &run_manifest).await?;
+    let (artifacts, private_reports) = if policy.is_private() {
+        let reports =
+            collect_private_artifacts(&run_directory, &job_manifest, &run_manifest).await?;
+        run_manifest = graph_custody::run_manifest(&job_manifest, &run_manifest)?;
+        reports
+    } else {
+        normalize_manifest_paths(&run_directory, &mut run_manifest).await?;
+        (
+            collect_artifacts(&run_directory, &run_manifest).await?,
+            BTreeMap::new(),
+        )
+    };
     let upload_started = Instant::now();
     let mut upload_metrics = GraphUploadMetrics::default();
     let mut uploaded_digests = BTreeSet::new();
     for artifact in &artifacts {
         if uploaded_digests.insert(artifact.sha256.clone()) {
-            upload_metrics
-                .add(upload_artifact(&client, upload_url_base, &run_directory, artifact).await?);
+            if let Some(bytes) = private_reports.get(&artifact.sha256) {
+                upload_artifact_bytes(&client, upload_url_base, artifact, bytes.clone(), None)
+                    .await?;
+                upload_metrics.bytes_uploaded += bytes.len() as u64;
+                upload_metrics.parts_uploaded += 1;
+            } else {
+                upload_metrics.add(
+                    upload_artifact(&client, upload_url_base, &run_directory, artifact).await?,
+                );
+            }
         }
     }
     upload_run_manifest(&client, upload_url_base, &run_manifest).await?;
@@ -242,6 +289,18 @@ async fn execute_with_runtime(
             artifact_parts_reused: upload_metrics.parts_reused,
         },
     })
+}
+
+async fn persist_private_stderr(
+    policy: &ExecutionPolicy,
+    run_directory: &Path,
+    stderr: &str,
+) -> Result<()> {
+    if policy.is_private() {
+        tokio::fs::create_dir_all(run_directory).await?;
+        tokio::fs::write(run_directory.join("worker.stderr.log"), stderr).await?;
+    }
+    Ok(())
 }
 
 fn asset_cache_root() -> PathBuf {
@@ -661,6 +720,68 @@ async fn collect_artifacts(
     Ok(artifacts)
 }
 
+type PrivateArtifacts = (Vec<GraphRunArtifact>, BTreeMap<String, Vec<u8>>);
+
+async fn collect_private_artifacts(
+    run_directory: &Path,
+    job: &Value,
+    manifest: &Value,
+) -> Result<PrivateArtifacts> {
+    let outputs = manifest["outputs"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing report outputs"))?;
+    let declarations = job["outputs"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing declared reports"))?;
+    let mut artifacts = Vec::new();
+    let mut names = BTreeSet::new();
+    let mut reports = BTreeMap::new();
+    for output in outputs {
+        let mut artifact = verified_manifest_artifact(run_directory, output, None).await?;
+        if !declarations
+            .iter()
+            .any(|declared| declared["name"].as_str() == Some(&artifact.name))
+            || !names.insert(artifact.name.clone())
+        {
+            return Err(anyhow!("unexpected or duplicate private report output"));
+        }
+        validate_private_artifact(&artifact)?;
+        let bytes = tokio::fs::read(run_directory.join(&artifact.path)).await?;
+        if !graph_custody::report_bytes(&bytes)
+            || format_digest(Sha256::digest(&bytes).as_slice()) != artifact.sha256
+        {
+            return Err(anyhow!(
+                "private report content is not sanitized or changed during verification"
+            ));
+        }
+        reports.insert(artifact.sha256.clone(), bytes);
+        artifact.path = format!("outputs/{}.json", artifact.name);
+        artifacts.push(artifact);
+    }
+    if artifacts.len() != declarations.len() {
+        return Err(anyhow!("missing declared private report"));
+    }
+    Ok((artifacts, reports))
+}
+
+fn validate_private_artifact(artifact: &GraphRunArtifact) -> Result<()> {
+    if !matches!(artifact.name.as_str(), "receipt" | "report")
+        || artifact.kind != "graph.output"
+        || !matches!(
+            artifact.content_type.as_str(),
+            "application/vnd.mere.identity-receipt+json"
+                | "application/vnd.mere.sanitized-report+json"
+        )
+        || artifact.size_bytes == 0
+        || artifact.size_bytes > graph_custody::MAX_REPORT_BYTES as u64
+    {
+        return Err(anyhow!(
+            "local custody permits only bounded declared receipt/report JSON"
+        ));
+    }
+    Ok(())
+}
+
 async fn verified_manifest_artifact(
     run_directory: &Path,
     value: &Value,
@@ -955,13 +1076,15 @@ mod tests {
     }
 
     fn unique_test_root(name: &str) -> PathBuf {
+        static NEXT_ROOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         std::env::temp_dir().join(format!(
-            "mere-run-node-{name}-{}-{}",
+            "mere-run-node-{name}-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system time should follow epoch")
-                .as_nanos()
+                .as_nanos(),
+            NEXT_ROOT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
     }
 
@@ -1054,7 +1177,7 @@ mod tests {
             .push(RecordedRequest {
                 method: method.clone(),
                 path: path.clone(),
-                body,
+                body: body.clone(),
             });
 
         let (status, content_type, response_body) = if method == "GET" {
@@ -1070,6 +1193,10 @@ mod tests {
             && (path.starts_with("/upload/artifacts/") || path == "/upload/run-manifest")
         {
             (200, "application/json", br#"{}"#.to_vec())
+        } else if method == "POST" && path == "/upload/bundle-ack" {
+            let request: Value =
+                serde_json::from_slice(&body).expect("acknowledgement should be JSON");
+            (200, "application/json", serde_json::to_vec(&serde_json::json!({"acknowledged":true,"request_sha256":request["request_sha256"]})).unwrap())
         } else {
             (404, "application/json", br#"{}"#.to_vec())
         };
@@ -1173,8 +1300,12 @@ printf '%s\n' '{{"sequence":0,"created_at":"2026-07-18T00:00:00Z","type":"run_st
             &format!("{}/upload", relay.base_url),
             event_sender,
             cancel_receiver,
-            &worker,
-            &cache,
+            &ExecutionPolicy::default(),
+            GraphRuntime {
+                binary: &worker,
+                cache_root: &cache,
+                private_root: &root.join("private"),
+            },
         )
         .await
         .expect("simulated graph execution should finish");
@@ -1215,6 +1346,228 @@ printf '%s\n' '{{"sequence":0,"created_at":"2026-07-18T00:00:00Z","type":"run_st
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn graph_simulator_private_uploads_only_reports_and_keeps_raw_files_local() {
+        let (root, relay, result, events) = simulate_private_graph(false, false).await;
+        let output = result.expect("private execution should finish");
+        assert_eq!(output.artifacts.len(), 1);
+        assert_eq!(output.artifacts[0].path, "outputs/receipt.json");
+        assert_eq!(output.run_manifest.as_object().unwrap().len(), 4);
+        assert!(!output
+            .run_manifest
+            .to_string()
+            .contains("PRIVATE-CUSTODY-MARKER"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["state"], "running");
+        assert!(!events[0].to_string().contains("PRIVATE-CUSTODY-MARKER"));
+
+        let requests = Arc::clone(&relay.requests);
+        relay.stop().await;
+        {
+            let requests = requests.lock().unwrap();
+            let ack = requests
+                .iter()
+                .position(|request| request.path == "/upload/bundle-ack")
+                .unwrap();
+            assert_eq!(
+                ack, 4,
+                "all four documents must be verified before acknowledgement"
+            );
+            let uploads: Vec<_> = requests
+                .iter()
+                .filter(|request| request.method == "PUT")
+                .collect();
+            assert_eq!(
+                uploads.len(),
+                2,
+                "no manifests, raw logs, or intermediate artifacts may be uploaded"
+            );
+            assert_eq!(uploads[0].path, "/upload/artifacts/receipt");
+            assert_eq!(uploads[1].path, "/upload/run-manifest");
+            assert_eq!(
+                format_digest(Sha256::digest(&uploads[0].body).as_slice()),
+                output.artifacts[0].sha256
+            );
+            for request in requests.iter() {
+                assert!(!String::from_utf8_lossy(&request.body).contains("PRIVATE-CUSTODY-MARKER"));
+            }
+        }
+        assert_private_files_retained(&root).await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn graph_simulator_private_rejects_unsafe_report_before_any_upload() {
+        let (root, relay, result, events) = simulate_private_graph(true, false).await;
+        assert!(result
+            .err()
+            .expect("unsafe report must fail")
+            .to_string()
+            .contains("not sanitized"));
+        assert!(!serde_json::to_string(&events)
+            .unwrap()
+            .contains("PRIVATE-CUSTODY-MARKER"));
+        let requests = Arc::clone(&relay.requests);
+        relay.stop().await;
+        assert!(!requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.method == "PUT"));
+        assert_private_files_retained(&root).await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn graph_simulator_private_cancellation_retains_logs_without_uploads() {
+        let (root, relay, result, _) = simulate_private_graph(false, true).await;
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("graph job cancelled"));
+        let requests = Arc::clone(&relay.requests);
+        relay.stop().await;
+        assert!(!requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.method == "PUT"));
+        assert_private_files_retained(&root).await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    async fn assert_private_files_retained(root: &Path) {
+        let mut attempts = tokio::fs::read_dir(root.join("private/job-private"))
+            .await
+            .unwrap();
+        let attempt = attempts.next_entry().await.unwrap().unwrap().path();
+        assert!(attempt.join("bundle/inputs.json").is_file());
+        for relative in [
+            "run/inputs.json",
+            "run/actions.json",
+            "run/events.jsonl",
+            "run/worker.stderr.log",
+        ] {
+            let content = tokio::fs::read_to_string(attempt.join(relative))
+                .await
+                .unwrap();
+            assert!(content.contains("PRIVATE-CUSTODY-MARKER"));
+        }
+    }
+
+    #[cfg(unix)]
+    async fn simulate_private_graph(
+        unsafe_report: bool,
+        cancel_after_start: bool,
+    ) -> (PathBuf, TestRelay, Result<GraphRunOutput>, Vec<Value>) {
+        let root = unique_test_root("private-graph");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let mut report = serde_json::json!({"schema":"example.receipt.v1", "state":"complete", "counts":{"accepted":2}});
+        if unsafe_report {
+            report["message"] = "PRIVATE-CUSTODY-MARKER".into();
+        }
+        let receipt = serde_json::to_vec(&report).unwrap();
+        let manifest = serde_json::json!({"contract_version":"mere.run/graph-run.v1", "job_id":"job-private",
+            "graph_fingerprint":"a".repeat(64), "state":"finished", "raw_prompt":"PRIVATE-CUSTODY-MARKER",
+            "outputs":[{"name":"receipt", "kind":"graph.output", "path":"outputs/receipt.json",
+              "content_type":"application/vnd.mere.identity-receipt+json", "size_bytes":receipt.len(),
+              "sha256":format_digest(Sha256::digest(&receipt).as_slice())}],
+            "nodes":[{"id":"private", "artifacts":[{"path":"/private/PRIVATE-CUSTODY-MARKER"}]}]});
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+if [ "$3" = "cancel" ]; then exit 0; fi
+run_dir=""
+bundle=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --run-dir) shift; run_dir="$1" ;;
+    --bundle) shift; bundle="$1" ;;
+  esac
+  shift
+done
+if [ -e "$run_dir" ]; then exit 72; fi
+mkdir -p "$run_dir/outputs"
+cp "$bundle/inputs.json" "$run_dir/inputs.json"
+printf '%s' '{report}' > "$run_dir/outputs/receipt.json"
+printf '%s' '{manifest}' > "$run_dir/run.json"
+printf '%s' 'PRIVATE-CUSTODY-MARKER' > "$run_dir/actions.json"
+printf '%s' 'PRIVATE-CUSTODY-MARKER' > "$run_dir/events.jsonl"
+printf '%s\n' 'PRIVATE-CUSTODY-MARKER' >&2
+printf '%s\n' '{{"sequence":0,"state":"running","type":"progress","node_id":"execute","message":"PRIVATE-CUSTODY-MARKER","path":"/private/PRIVATE-CUSTODY-MARKER"}}'
+if [ "{cancel_after_start}" = "true" ]; then while :; do sleep 1; done; fi
+"#
+        );
+        let worker = write_fake_worker(&root, &script).await;
+        let job = serde_json::json!({"job_id":"job-private", "data_policy":graph_custody::POLICY,
+            "graph_fingerprint":"a".repeat(64), "outputs":[{"name":"receipt"}]});
+        let documents: BTreeMap<_, _> = [
+            ("job.json", job),
+            ("graph.json", serde_json::json!({})),
+            (
+                "inputs.json",
+                serde_json::json!({"prompt":"PRIVATE-CUSTODY-MARKER"}),
+            ),
+            ("assets.json", serde_json::json!({"groups":[]})),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), serde_json::to_vec(&value).unwrap()))
+        .collect();
+        let relay = start_test_relay(documents.clone()).await;
+        let files: Vec<_> = documents
+            .iter()
+            .map(|(name, bytes)| GraphBundleFile {
+                path: name.clone(),
+                url: format!("{}/bundle/{name}", relay.base_url),
+                size_bytes: bytes.len() as u64,
+                sha256: format_digest(Sha256::digest(bytes).as_slice()),
+            })
+            .collect();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (cancel_sender, cancellation) = watch::channel(false);
+        let upload_base = format!("{}/upload", relay.base_url);
+        let cache_root = root.join("cache");
+        let private_root = root.join("private");
+        let policy = ExecutionPolicy {
+            data_policy: Some(graph_custody::POLICY.into()),
+            request_sha256: Some("b".repeat(64)),
+        };
+        let execution = execute_with_runtime(
+            "job-private",
+            &files,
+            &upload_base,
+            sender,
+            cancellation,
+            &policy,
+            GraphRuntime {
+                binary: &worker,
+                cache_root: &cache_root,
+                private_root: &private_root,
+            },
+        );
+        let receive = async move {
+            let mut events = Vec::new();
+            while let Some(event) = receiver.recv().await {
+                events.push(event);
+                if cancel_after_start {
+                    cancel_sender.send(true).unwrap();
+                }
+            }
+            events
+        };
+        let (result, events) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(execution, receive)
+        })
+        .await
+        .unwrap();
+        (root, relay, result, events)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn graph_simulator_cancels_worker_and_cleans_up() {
         let root = unique_test_root("graph-simulator-cancel");
         tokio::fs::create_dir_all(&root)
@@ -1244,8 +1597,12 @@ done
                 &upload_url_base,
                 event_sender,
                 cancel_receiver,
-                &worker,
-                &cache,
+                &ExecutionPolicy::default(),
+                GraphRuntime {
+                    binary: &worker,
+                    cache_root: &cache,
+                    private_root: &cache.join("private"),
+                },
             )
             .await
         });

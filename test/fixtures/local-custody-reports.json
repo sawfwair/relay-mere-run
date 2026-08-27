@@ -1,0 +1,20 @@
+[
+  {"name":"aggregate receipt", "valid":true, "report":{"schema":"example.receipt.v1","state":"complete","counts":{"accepted":2},"passed":true}},
+  {"name":"source digest", "valid":true, "report":{"source_digests":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}},
+  {"name":"local reference", "valid":true, "report":{"dataset_ref":"example-local://datasets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+  {"name":"numeric text metric", "valid":true, "report":{"metrics":{"prompt_tokens":32,"response_tokens":8,"text_similarity":0.8}}},
+  {"name":"four evaluation arms", "valid":true, "report":{"aggregates":{"base_neutral":{"score":0.5},"base_prompt":{"score":0.6},"adapter_neutral":{"score":0.7},"adapter_prompt":{"score":0.8}},"comparisons":[{"metric":"score","baseline_arm":"base_prompt","candidate_arm":"adapter_prompt","delta":0.2}]}},
+  {"name":"arm is not raw text", "valid":false, "report":{"aggregates":{"base_prompt":{"output":"private"}}}},
+  {"name":"raw prompt", "valid":false, "report":{"raw_prompt":"private"}},
+  {"name":"diagnostic message", "valid":false, "report":{"message":"private"}},
+  {"name":"nested private text", "valid":false, "report":{"metrics":{"details":{"text":"private"}}}},
+  {"name":"absolute model path", "valid":false, "report":{"model":"/private/model"}},
+  {"name":"credential", "valid":false, "report":{"credential":"sensitive"}},
+  {"name":"bad digest", "valid":false, "report":{"source_digests":["invalid"]}},
+  {"name":"file reference", "valid":false, "report":{"dataset_ref":"file:///private/data"}},
+  {"name":"local traversal", "valid":false, "report":{"dataset_ref":"example-local://datasets/../private"}},
+  {"name":"invalid URI scheme", "valid":false, "report":{"dataset_ref":"1-local://datasets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+  {"name":"non-ASCII identifier", "valid":false, "report":{"model_id":"mödél"}},
+  {"name":"private field with boolean", "valid":false, "report":{"raw":true}},
+  {"name":"array root", "valid":false, "report":[]}
+]

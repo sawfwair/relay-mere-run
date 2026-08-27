@@ -24,6 +24,7 @@ import {
 import { failInProgressWorkForAgent } from './relay-lifecycle';
 import { assignQueuedWork } from './relay-queue';
 import { handleGraphMaintenanceAlarm } from './relay-graph-operations';
+import { prepareGraphForStorage } from './relay-graph-custody';
 import {
   handleWebhookAlarm,
   scheduleAsrWebhookIfNeeded,
@@ -184,6 +185,7 @@ export class MereRunRelay extends DurableObject<Env> {
   }
 
   private async saveGraphJob(job: GraphJob): Promise<void> {
+    prepareGraphForStorage(job);
     this.graphJobs.set(job.job_id, job);
     await this.ctx.storage.put(`graph:${job.job_id}`, job);
   }

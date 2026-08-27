@@ -43,6 +43,7 @@ const graphWorkerCapabilitiesSchema = z.object({
   schema_version: z.number(),
   worker_version: z.string(),
   contract_versions: z.array(z.string()),
+  data_policies: z.array(z.string()).optional(),
   platform: z.string(),
   architecture: z.string(),
   accelerator_backend: z.string(),

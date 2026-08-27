@@ -21,6 +21,8 @@ import {
   isTalkStatusResponse,
   isUploadResponse,
 } from './runtime-contracts';
+import { isGraphStatusResponse, type GraphStatusResponse, type GraphSubmission } from './graph-contracts';
+export type { GraphDataPolicy, GraphPayloadState, GraphExecutionState, GraphStatusResponse, GraphSubmission } from './graph-contracts';
 
 export const DEFAULT_MERE_RUN_RELAY_BASE_URL = 'https://relay.mere.run';
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -535,6 +537,23 @@ export class MereRunRelayClient {
 
   async getStatus(): Promise<StatusResponse> {
     return this.request('/status', isStatusResponse);
+  }
+
+  /** Keep the exact original submission for idempotent retries or replay_required recovery. */
+  async submitGraph(request: GraphSubmission): Promise<GraphStatusResponse> {
+    return this.request('/graph-jobs', isGraphStatusResponse, { method: 'POST', body: JSON.stringify(request) });
+  }
+
+  async commitGraph(jobId: string): Promise<GraphStatusResponse> {
+    return this.request(`/graph-jobs/${encodeURIComponent(jobId)}/commit`, isGraphStatusResponse, { method: 'POST' });
+  }
+
+  async getGraph(jobId: string): Promise<GraphStatusResponse> {
+    return this.request(`/graph-jobs/${encodeURIComponent(jobId)}`, isGraphStatusResponse);
+  }
+
+  async cancelGraph(jobId: string): Promise<GraphStatusResponse> {
+    return this.request(`/graph-jobs/${encodeURIComponent(jobId)}`, isGraphStatusResponse, { method: 'DELETE' });
   }
 
   async submitJob(request: SubmitJobRequest): Promise<SubmitJobResponse> {

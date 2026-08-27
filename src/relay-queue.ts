@@ -31,6 +31,7 @@ import {
   scoreAgentForWork,
 } from './relay-fleet';
 import { graphUploadUrlBase, materializeRelayBundle } from './relay-graph-storage';
+import { hasLocalCustody, LOCAL_CUSTODY_POLICY } from './relay-graph-custody';
 
 function normalizeModelName(model: string): string {
   const normalized = model.toLowerCase();
@@ -209,9 +210,18 @@ export function supportsTool(info: AgentInfo, tool: Tool): boolean {
 }
 
 function requiredDeviceBlockers(info: AgentInfo, graph: GraphJob): GraphPlacementBlocker[] {
+  const custody: GraphPlacementBlocker[] = [];
+  if (hasLocalCustody(graph)) {
+    if (!info.capabilities.graph_worker?.data_policies?.includes(LOCAL_CUSTODY_POLICY)) {
+      custody.push({ code: 'data_policy_unsupported', message: 'Node must support the requested local-custody data policy' });
+    }
+    if (graph.payload_redacted && ['planned', 'queued'].includes(graph.state)) {
+      custody.push({ code: 'payload_replay_required', message: 'Resubmit the exact original request to recover its transient payload' });
+    }
+  }
   const requiredDeviceId = graph.job.requirements.required_device_id;
-  if (!requiredDeviceId || info.device_id === requiredDeviceId) return [];
-  return [{
+  if (!requiredDeviceId || info.device_id === requiredDeviceId) return custody;
+  return [...custody, {
     code: 'required_device_mismatch',
     message: `Job is pinned to device ${requiredDeviceId}`,
   }];
@@ -855,6 +865,8 @@ async function sendGraphToAgent(
   graph: GraphJob,
   agent: ConnectedAgentRecord
 ): Promise<boolean> {
+  // A disconnected previous attempt must not keep a usable upload capability.
+  if (hasLocalCustody(graph)) graph.node_token = crypto.randomUUID().replaceAll('-', '');
   const message: GraphRequestMessage = {
     type: 'graph_request',
     job_id: graph.job_id,
@@ -862,6 +874,8 @@ async function sendGraphToAgent(
     owner_user_id: graph.user_id,
     bundle_files: await materializeRelayBundle(ctx, graph),
     upload_url_base: graphUploadUrlBase(graph),
+    ...(hasLocalCustody(graph) ? { data_policy: graph.job.data_policy, request_sha256: graph.request_sha256,
+      assignment_token: graph.node_token } : {}),
   };
 
   try {

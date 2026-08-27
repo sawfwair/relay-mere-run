@@ -1145,7 +1145,13 @@ async fn handle_server_message<R: Runtime>(
             owner_user_id,
             bundle_files,
             upload_url_base,
+            data_policy,
+            request_sha256,
+            assignment_token,
         } => {
+            if data_policy.is_some() && assignment_token.as_ref().is_none_or(String::is_empty) {
+                return Err(anyhow!("private graph assignment token is required"));
+            }
             let (cancel_tx, cancel_rx) = watch::channel(false);
             {
                 let mut active = active_graphs.lock().await;
@@ -1174,11 +1180,13 @@ async fn handle_server_message<R: Runtime>(
                 let event_out = forward_out.clone();
                 let event_job_id = forward_job_id.clone();
                 let event_owner_id = forward_owner_id.clone();
+                let event_assignment_token = assignment_token.clone();
                 let event_forwarder = tokio::spawn(async move {
                     while let Some(event) = event_rx.recv().await {
                         let message = AgentMessage::GraphEvent {
                             job_id: event_job_id.clone(),
                             owner_user_id: Some(event_owner_id.clone()),
+                            assignment_token: event_assignment_token.clone(),
                             event,
                         };
                         let Ok(text) = serde_json::to_string(&message) else {
@@ -1196,6 +1204,10 @@ async fn handle_server_message<R: Runtime>(
                     &upload_url_base,
                     event_tx,
                     cancel_rx,
+                    crate::graph_custody::ExecutionPolicy {
+                        data_policy: data_policy.clone(),
+                        request_sha256,
+                    },
                 )
                 .await;
                 let _ = event_forwarder.await;
@@ -1203,6 +1215,7 @@ async fn handle_server_message<R: Runtime>(
                     Ok(output) => AgentMessage::GraphResult {
                         job_id: forward_job_id.clone(),
                         owner_user_id: Some(forward_owner_id),
+                        assignment_token: assignment_token.clone(),
                         run_manifest: output.run_manifest,
                         artifacts: output.artifacts,
                         metrics: output.metrics,
@@ -1210,7 +1223,12 @@ async fn handle_server_message<R: Runtime>(
                     Err(error) => AgentMessage::GraphError {
                         job_id: forward_job_id.clone(),
                         owner_user_id: Some(forward_owner_id),
-                        error: error.to_string(),
+                        assignment_token,
+                        error: if data_policy.is_some() {
+                            "GRAPH_EXECUTION_FAILED".to_string()
+                        } else {
+                            error.to_string()
+                        },
                     },
                 };
                 send_graph_completion(&active, &forward_out, &forward_job_id, message).await;
@@ -2064,6 +2082,7 @@ mod tests {
             AgentMessage::GraphError {
                 job_id: "retry-job".to_string(),
                 owner_user_id: Some("owner".to_string()),
+                assignment_token: None,
                 error: "cancelled".to_string(),
             },
         )
