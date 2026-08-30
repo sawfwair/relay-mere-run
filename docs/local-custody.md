@@ -2,7 +2,7 @@
 
 Set `job.data_policy` to `local-custody.v1` for a graph whose source material,
 datasets, weights, checkpoints, logs, and per-example results must stay on the
-execution node. Relay Node 0.2.19 implements this transport policy around the
+execution node. Relay Node 0.2.20 implements this transport policy around the
 existing native graph runtime. The normal portable graph API is unchanged for
 jobs without the policy.
 
@@ -63,6 +63,12 @@ numeric metric maps. No free-form messages, prompts, responses, file paths, or
 credential fields are admitted. This is a structural contract, not a detector
 for data deliberately encoded into a number or identifier; providers must also
 honor local custody.
+
+If the native graph runtime labels a graph output alias as
+`application/octet-stream`, the node recovers its media type only from a
+confined, rehashed provider-node artifact with the same name, size, and digest.
+Exactly one allowed receipt/report media type must be proven; missing or
+ambiguous evidence remains rejected.
 
 Relay stores sanitized reports under their SHA-256, never a mutable output
 name. A superseded upload cannot replace terminal report bytes. An upload that

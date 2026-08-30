@@ -1,7 +1,7 @@
 {
   "name": "mere-run-node",
   "private": true,
-  "version": "0.2.19",
+  "version": "0.2.20",
   "description": "Desktop compute node for the mere.run relay.",
   "license": "MIT",
   "repository": {
@@ -39,5 +39,10 @@
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
     "vitest": "^3.2.4"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

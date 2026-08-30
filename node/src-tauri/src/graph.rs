@@ -745,6 +745,13 @@ async fn collect_private_artifacts(
         {
             return Err(anyhow!("unexpected or duplicate private report output"));
         }
+        let media_type_evidence = private_output_media_type_evidence(manifest, &artifact);
+        artifact = recover_private_output_content_type(
+            run_directory.to_path_buf(),
+            artifact,
+            media_type_evidence,
+        )
+        .await?;
         validate_private_artifact(&artifact)?;
         let bytes = tokio::fs::read(run_directory.join(&artifact.path)).await?;
         if !graph_custody::report_bytes(&bytes)
@@ -762,6 +769,51 @@ async fn collect_private_artifacts(
         return Err(anyhow!("missing declared private report"));
     }
     Ok((artifacts, reports))
+}
+
+fn private_output_media_type_evidence(manifest: &Value, output: &GraphRunArtifact) -> Vec<Value> {
+    manifest["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|node| node["artifacts"].as_array())
+        .flatten()
+        .filter(|candidate| {
+            candidate["name"].as_str() == Some(&output.name)
+                && candidate["sha256"].as_str() == Some(&output.sha256)
+                && candidate["size_bytes"].as_u64() == Some(output.size_bytes)
+        })
+        .cloned()
+        .collect()
+}
+
+async fn recover_private_output_content_type(
+    run_directory: PathBuf,
+    mut output: GraphRunArtifact,
+    media_type_evidence: Vec<Value>,
+) -> Result<GraphRunArtifact> {
+    if output.kind != "graph.output" || output.content_type != "application/octet-stream" {
+        return Ok(output);
+    }
+
+    let mut content_types = BTreeSet::new();
+    for candidate in media_type_evidence {
+        let verified = verified_manifest_artifact(&run_directory, &candidate, None).await?;
+        if matches!(
+            verified.content_type.as_str(),
+            "application/vnd.mere.identity-receipt+json"
+                | "application/vnd.mere.sanitized-report+json"
+        ) {
+            content_types.insert(verified.content_type);
+        }
+    }
+
+    if content_types.len() == 1 {
+        output.content_type = content_types
+            .pop_first()
+            .expect("one verified content type should exist");
+    }
+    Ok(output)
 }
 
 fn validate_private_artifact(artifact: &GraphRunArtifact) -> Result<()> {
@@ -1351,6 +1403,10 @@ printf '%s\n' '{{"sequence":0,"created_at":"2026-07-18T00:00:00Z","type":"run_st
         let output = result.expect("private execution should finish");
         assert_eq!(output.artifacts.len(), 1);
         assert_eq!(output.artifacts[0].path, "outputs/receipt.json");
+        assert_eq!(
+            output.artifacts[0].content_type,
+            "application/vnd.mere.identity-receipt+json"
+        );
         assert_eq!(output.run_manifest.as_object().unwrap().len(), 4);
         assert!(!output
             .run_manifest
@@ -1392,6 +1448,51 @@ printf '%s\n' '{{"sequence":0,"created_at":"2026-07-18T00:00:00Z","type":"run_st
             }
         }
         assert_private_files_retained(&root).await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn private_output_media_type_recovery_rejects_ambiguous_evidence() {
+        let root = unique_test_root("private-output-media-type");
+        tokio::fs::create_dir_all(root.join("outputs"))
+            .await
+            .unwrap();
+        let bytes = br#"{"schema":"example.receipt.v1","state":"complete"}"#;
+        tokio::fs::write(root.join("outputs/receipt.json"), bytes)
+            .await
+            .unwrap();
+        let sha256 = format_digest(Sha256::digest(bytes).as_slice());
+        let artifact = |content_type: &str| {
+            serde_json::json!({
+                "name": "receipt",
+                "kind": "example.receipt",
+                "path": "outputs/receipt.json",
+                "content_type": content_type,
+                "size_bytes": bytes.len(),
+                "sha256": sha256.clone(),
+            })
+        };
+        let manifest = serde_json::json!({
+            "nodes": [{"artifacts": [
+                artifact("application/vnd.mere.identity-receipt+json"),
+                artifact("application/vnd.mere.sanitized-report+json")
+            ]}]
+        });
+        let mut output = GraphRunArtifact {
+            name: "receipt".into(),
+            kind: "graph.output".into(),
+            path: "outputs/receipt.json".into(),
+            content_type: "application/octet-stream".into(),
+            size_bytes: bytes.len() as u64,
+            sha256,
+        };
+
+        let evidence = private_output_media_type_evidence(&manifest, &output);
+        output = recover_private_output_content_type(root.clone(), output, evidence)
+            .await
+            .unwrap();
+        assert_eq!(output.content_type, "application/octet-stream");
+        assert!(validate_private_artifact(&output).is_err());
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
@@ -1470,12 +1571,16 @@ printf '%s\n' '{{"sequence":0,"created_at":"2026-07-18T00:00:00Z","type":"run_st
             report["message"] = "PRIVATE-CUSTODY-MARKER".into();
         }
         let receipt = serde_json::to_vec(&report).unwrap();
+        let receipt_sha256 = format_digest(Sha256::digest(&receipt).as_slice());
         let manifest = serde_json::json!({"contract_version":"mere.run/graph-run.v1", "job_id":"job-private",
             "graph_fingerprint":"a".repeat(64), "state":"finished", "raw_prompt":"PRIVATE-CUSTODY-MARKER",
             "outputs":[{"name":"receipt", "kind":"graph.output", "path":"outputs/receipt.json",
-              "content_type":"application/vnd.mere.identity-receipt+json", "size_bytes":receipt.len(),
-              "sha256":format_digest(Sha256::digest(&receipt).as_slice())}],
-            "nodes":[{"id":"private", "artifacts":[{"path":"/private/PRIVATE-CUSTODY-MARKER"}]}]});
+              "content_type":"application/octet-stream", "size_bytes":receipt.len(),
+              "sha256":receipt_sha256}],
+            "nodes":[{"id":"private", "artifacts":[{"name":"receipt", "kind":"example.receipt",
+              "path":"outputs/receipt.json", "content_type":"application/vnd.mere.identity-receipt+json",
+              "size_bytes":receipt.len(), "sha256":receipt_sha256},
+              {"path":"/private/PRIVATE-CUSTODY-MARKER"}]}]});
         let script = format!(
             r#"#!/bin/sh
 set -eu
