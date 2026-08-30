@@ -69,6 +69,7 @@ export const chatMessageSchema = z.object({
 }).passthrough();
 
 export const submitChatRequestSchema = z.object({
+  chat_id: z.string().regex(/^chat_[a-f0-9]{32}$/u).optional(),
   messages: z.array(chatMessageSchema),
   max_tokens: z.number().optional(),
   temperature: z.number().optional(),

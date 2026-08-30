@@ -1,3 +1,5 @@
+import type { SubmitChatRequest } from './types';
+
 const encoder = new TextEncoder();
 
 function canonicalize(value: unknown): unknown {
@@ -24,6 +26,18 @@ export function canonicalJson(value: unknown): string {
 
 export async function sha256Json(value: unknown): Promise<string> {
   return sha256Text(canonicalJson(value));
+}
+
+/** The same runtime projection authorizes a grant and addresses its receipt.
+ * Transport IDs and wire-compatibility flags do not change model execution. */
+export function chatRequestContent(request: SubmitChatRequest): unknown {
+  return {
+    messages: request.messages, max_tokens: request.max_tokens,
+    temperature: request.temperature, requires_json: request.requires_json,
+    adapter: request.adapter, required_device_id: request.required_device_id,
+    execution_spec_sha256: request.execution_spec_sha256, identity: request.identity,
+    model: request.model,
+  };
 }
 
 export function graphRequestContent(body: {
