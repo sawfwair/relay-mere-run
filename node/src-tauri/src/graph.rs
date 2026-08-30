@@ -165,10 +165,11 @@ async fn execute_with_runtime(
     policy.acknowledge(&client, upload_url_base).await?;
 
     let execution_started = Instant::now();
-    let mut child = Command::new(binary)
-        // External graph providers that delegate native inference must invoke
-        // the same selected runtime as the worker, not an older `mere.run`
-        // wrapper that happens to appear first on PATH.
+    let mut worker_command = Command::new(binary);
+    // External graph providers that delegate native inference must invoke
+    // the same selected runtime as the worker, not an older `mere.run`
+    // wrapper that happens to appear first on PATH.
+    worker_command
         .env("MERE_RUN_EXECUTABLE", binary)
         .args(["graph", "worker", "execute", "--bundle"])
         .arg(&bundle_directory)
@@ -177,9 +178,14 @@ async fn execute_with_runtime(
         .arg("--json-stream")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    configure_graph_worker_process_group(&mut worker_command);
+    let mut child = worker_command
         .spawn()
         .context("failed to start mere.run graph worker")?;
+    let worker_process_id = child
+        .id()
+        .ok_or_else(|| anyhow!("graph worker did not expose a process id"))?;
 
     let stdout = child
         .stdout
@@ -208,6 +214,7 @@ async fn execute_with_runtime(
             }
             _ = wait_for_cancel(&mut cancel) => {
                 request_worker_cancel(binary, &run_directory).await;
+                terminate_graph_worker_process_group(worker_process_id).await;
                 let _ = child.start_kill();
                 let _ = child.wait().await;
                 if let Ok(Ok(stderr)) = stderr_reader.await {
@@ -413,6 +420,35 @@ async fn request_worker_cancel(binary: &Path, run_directory: &Path) {
         .output()
         .await;
 }
+
+#[cfg(unix)]
+fn configure_graph_worker_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.as_std_mut().process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_graph_worker_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+async fn terminate_graph_worker_process_group(process_id: u32) {
+    let process_group = -(process_id as i32);
+    // SAFETY: the graph worker was spawned as a fresh process group, so these
+    // signals are confined to that worker and every provider/native child it
+    // launched for this one Relay execution.
+    unsafe {
+        libc::kill(process_group, libc::SIGTERM);
+    }
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    // SAFETY: see above. SIGKILL prevents a provider or native inference child
+    // from surviving a confirmed Relay cancellation after ignoring SIGTERM.
+    unsafe {
+        libc::kill(process_group, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+async fn terminate_graph_worker_process_group(_process_id: u32) {}
 
 fn relay_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
@@ -1678,16 +1714,25 @@ if [ "{cancel_after_start}" = "true" ]; then while :; do sleep 1; done; fi
         tokio::fs::create_dir_all(&root)
             .await
             .expect("simulator root should exist");
+        let descendant_pid_path = root.join("descendant.pid");
         let script = r#"#!/bin/sh
 if [ "$3" = "cancel" ]; then
   exit 0
 fi
+sleep 600 &
+echo "$!" > "__DESCENDANT_PID__"
 printf '%s\n' '{"sequence":0,"created_at":"2026-07-18T00:00:00Z","type":"run_started","state":"running"}'
 while :; do
   sleep 1
 done
-"#;
-        let worker = write_fake_worker(&root, script).await;
+"#
+        .replace(
+            "__DESCENDANT_PID__",
+            descendant_pid_path
+                .to_str()
+                .expect("test path should be valid UTF-8"),
+        );
+        let worker = write_fake_worker(&root, &script).await;
         let cache = root.join("cache");
         let (_, documents) = bundle_files("http://unused");
         let relay = start_test_relay(documents).await;
@@ -1717,6 +1762,19 @@ done
             .expect("worker should start before timeout")
             .expect("worker should emit a start event");
         assert_eq!(event["type"], "run_started");
+        let descendant_pid = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(value) = tokio::fs::read_to_string(&descendant_pid_path).await {
+                    break value
+                        .trim()
+                        .parse::<i32>()
+                        .expect("descendant pid should be numeric");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("worker should record its descendant pid");
         cancel_sender
             .send(true)
             .expect("cancellation should reach worker");
@@ -1729,6 +1787,11 @@ done
             Err(error) => error,
         };
         assert!(error.to_string().contains("graph job cancelled"));
+        let descendant_exists = unsafe { libc::kill(descendant_pid, 0) } == 0;
+        assert!(
+            !descendant_exists,
+            "graph worker descendant survived cancellation"
+        );
 
         relay.stop().await;
         tokio::fs::remove_dir_all(root).await.ok();

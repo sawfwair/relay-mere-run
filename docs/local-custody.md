@@ -2,7 +2,7 @@
 
 Set `job.data_policy` to `local-custody.v1` for a graph whose source material,
 datasets, weights, checkpoints, logs, and per-example results must stay on the
-execution node. Relay Node 0.2.20 implements this transport policy around the
+execution node. Relay Node 0.2.21 implements this transport policy around the
 existing native graph runtime. The normal portable graph API is unchanged for
 jobs without the policy.
 
