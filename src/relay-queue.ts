@@ -870,7 +870,7 @@ async function sendGraphToAgent(
   agent: ConnectedAgentRecord
 ): Promise<boolean> {
   // A disconnected previous attempt must not keep a usable upload capability.
-  if (hasLocalCustody(graph)) graph.node_token = crypto.randomUUID().replaceAll('-', '');
+  graph.node_token = crypto.randomUUID().replaceAll('-', '');
   const message: GraphRequestMessage = {
     type: 'graph_request',
     job_id: graph.job_id,
@@ -878,8 +878,8 @@ async function sendGraphToAgent(
     owner_user_id: graph.user_id,
     bundle_files: await materializeRelayBundle(ctx, graph),
     upload_url_base: graphUploadUrlBase(graph),
-    ...(hasLocalCustody(graph) ? { data_policy: graph.job.data_policy, request_sha256: graph.request_sha256,
-      assignment_token: graph.node_token } : {}),
+    assignment_token: graph.node_token,
+    ...(hasLocalCustody(graph) ? { data_policy: graph.job.data_policy, request_sha256: graph.request_sha256 } : {}),
   };
 
   try {

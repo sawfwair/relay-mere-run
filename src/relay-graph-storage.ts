@@ -161,6 +161,11 @@ export async function graphBundleObject(
   return ctx.env.IMAGES.get(graphBundleKey(job.user_id, job.job_id, path));
 }
 
+export function graphArtifactObjectName(job: GraphJob, artifact: GraphRunArtifact): string {
+  return hasLocalCustody(job) || ['graph.node-output', 'graph.preview'].includes(artifact.kind)
+    ? artifact.sha256 : artifact.name;
+}
+
 export async function storeGraphArtifact(
   ctx: RelayContext,
   job: GraphJob,
@@ -169,7 +174,7 @@ export async function storeGraphArtifact(
 ): Promise<void> {
   // Content addressing prevents a late, superseded attempt from replacing
   // the report bytes already named by a terminal receipt.
-  const objectName = hasLocalCustody(job) ? artifact.sha256 : artifact.name;
+  const objectName = graphArtifactObjectName(job, artifact);
   await ctx.env.IMAGES.put(graphArtifactKey(job.user_id, job.job_id, objectName), bytes, {
     httpMetadata: { contentType: artifact.content_type || 'application/octet-stream' },
     customMetadata: { sha256: artifact.sha256 },
