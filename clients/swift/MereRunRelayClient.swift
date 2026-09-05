@@ -235,6 +235,49 @@ public struct MereRunRelayChatMessage: Codable, Sendable {
     }
 }
 
+public struct MereRunRelayTextAdapterReference: Codable, Sendable {
+    public var manifestSha256: String
+    public var baseModelId: String
+    public var scale: Double?
+
+    public init(manifestSha256: String, baseModelId: String, scale: Double? = nil) {
+        self.manifestSha256 = manifestSha256
+        self.baseModelId = baseModelId
+        self.scale = scale
+    }
+}
+
+public struct MereRunRelayIdentityExecutionReference: Codable, Sendable {
+    public var personaId: String
+    public var versionId: String
+    public var deploymentId: String
+
+    public init(personaId: String, versionId: String, deploymentId: String) {
+        self.personaId = personaId
+        self.versionId = versionId
+        self.deploymentId = deploymentId
+    }
+}
+
+public struct MereRunRelayExecutionReceipt: Codable, Sendable {
+    public let schema: String
+    public let executionId: String
+    public let requestSha256: String
+    public let executionSpecSha256: String?
+    public let modelId: String
+    public let adapterManifestSha256: String?
+    public let providerId: String
+    public let providerVersion: String?
+    public let providerCatalogSha256: String?
+    public let deviceId: String?
+    public let startedAt: String?
+    public let completedAt: String
+    public let durationMs: Double?
+    public let state: MereRunRelayChatStatus
+    public let outputSha256: String?
+    public let errorCode: String?
+}
+
 public struct MereRunRelaySubmitChatRequest: Codable, Sendable {
     public var messages: [MereRunRelayChatMessage]
     public var maxTokens: Int?
@@ -242,6 +285,12 @@ public struct MereRunRelaySubmitChatRequest: Codable, Sendable {
     public var requiresJson: Bool?
     public var useLora: Bool?
     public var model: String?
+    public var chatId: String?
+    public var idempotencyKey: String?
+    public var executionSpecSha256: String?
+    public var requiredDeviceId: String?
+    public var adapter: MereRunRelayTextAdapterReference?
+    public var identity: MereRunRelayIdentityExecutionReference?
 
     public init(
         messages: [MereRunRelayChatMessage],
@@ -249,7 +298,13 @@ public struct MereRunRelaySubmitChatRequest: Codable, Sendable {
         temperature: Double? = nil,
         requiresJson: Bool? = nil,
         useLora: Bool? = nil,
-        model: String? = nil
+        model: String? = nil,
+        chatId: String? = nil,
+        idempotencyKey: String? = nil,
+        executionSpecSha256: String? = nil,
+        requiredDeviceId: String? = nil,
+        adapter: MereRunRelayTextAdapterReference? = nil,
+        identity: MereRunRelayIdentityExecutionReference? = nil
     ) {
         self.messages = messages
         self.maxTokens = maxTokens
@@ -257,6 +312,12 @@ public struct MereRunRelaySubmitChatRequest: Codable, Sendable {
         self.requiresJson = requiresJson
         self.useLora = useLora
         self.model = model
+        self.chatId = chatId
+        self.idempotencyKey = idempotencyKey
+        self.executionSpecSha256 = executionSpecSha256
+        self.requiredDeviceId = requiredDeviceId
+        self.adapter = adapter
+        self.identity = identity
     }
 }
 
@@ -280,6 +341,7 @@ public struct MereRunRelayChatStatusResponse: Codable, Sendable {
     public let createdAt: String
     public let startedAt: String?
     public let completedAt: String?
+    public let executionReceipt: MereRunRelayExecutionReceipt?
 }
 
 public struct MereRunRelaySubmitTalkRequest: Codable, Sendable {

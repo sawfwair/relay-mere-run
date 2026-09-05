@@ -15,6 +15,8 @@ request:
 - `adapter`: exact `{ manifest_sha256, base_model_id, scale }`;
 - `required_device_id`: optional compatible node pin;
 - `idempotency_key`: account-scoped logical execution key.
+- `chat_id`: optional broker-reserved `chat_<32 lowercase hex>` ID;
+  required when submitting with a single-chat execution grant.
 
 `use_lora` remains wire-compatible. `true` without `adapter` fails with
 `ADAPTER_REFERENCE_REQUIRED`; Relay never silently downgrades to prompt-only.

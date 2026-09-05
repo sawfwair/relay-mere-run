@@ -1178,6 +1178,7 @@ export interface ChatErrorMessage {
 
 // HTTP API types for chat
 export interface SubmitChatRequest {
+  chat_id?: string;
   messages: ChatMessage[];
   max_tokens?: number;
   temperature?: number;
