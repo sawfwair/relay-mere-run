@@ -17,6 +17,8 @@ use crate::protocol::{
     GraphBundleFile, GraphExecutionMetrics, GraphRunArtifact, GraphWorkerCapabilities,
 };
 
+mod publication;
+
 const ARTIFACT_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 const ARTIFACT_UPLOAD_ATTEMPTS: usize = 3;
 const DEFAULT_MAX_GRAPH_BUNDLE_BYTES: u64 = 100 * 1024 * 1024 * 1024;
@@ -202,6 +204,14 @@ async fn execute_with_runtime(
         reader.read_to_string(&mut text).await.map(|_| text)
     });
 
+    let publications = if policy.is_private() {
+        None
+    } else {
+        Some(publication::PublicationQueue::start(
+            upload_url_base.to_string(),
+            run_directory.clone(),
+        )?)
+    };
     loop {
         tokio::select! {
             line = lines.next_line() => {
@@ -209,10 +219,12 @@ async fn execute_with_runtime(
                 if line.trim().is_empty() { continue; }
                 let event = serde_json::from_str::<Value>(&line)
                     .with_context(|| format!("graph worker emitted invalid JSON: {line}"))?;
-                let public_event = if policy.is_private() { graph_custody::event(event) } else { event };
+                if let Some(queue) = &publications { queue.observe(&event); }
+                let public_event = if policy.is_private() { graph_custody::event(event) } else { publication::pending_event(event) };
                 events.send(public_event).map_err(|_| anyhow!("graph event receiver closed"))?;
             }
             _ = wait_for_cancel(&mut cancel) => {
+                if let Some(queue) = publications { queue.cancel().await; }
                 request_worker_cancel(binary, &run_directory).await;
                 terminate_graph_worker_process_group(worker_process_id).await;
                 let _ = child.start_kill();
@@ -230,6 +242,13 @@ async fn execute_with_runtime(
         .await
         .map_err(|error| anyhow!("graph stderr task failed: {error}"))??;
     persist_private_stderr(policy, &run_directory, &stderr).await?;
+    let early_metrics = match publications {
+        Some(queue) => tokio::select! {
+            metrics = queue.finish() => metrics,
+            _ = wait_for_cancel(&mut cancel) => return Err(anyhow!("graph job cancelled")),
+        },
+        None => GraphUploadMetrics::default(),
+    };
     if !status.success() {
         let diagnostic = stderr.trim();
         return Err(anyhow!(
@@ -263,7 +282,7 @@ async fn execute_with_runtime(
         )
     };
     let upload_started = Instant::now();
-    let mut upload_metrics = GraphUploadMetrics::default();
+    let mut upload_metrics = early_metrics;
     let mut uploaded_digests = BTreeSet::new();
     for artifact in &artifacts {
         if uploaded_digests.insert(artifact.sha256.clone()) {
@@ -1278,7 +1297,9 @@ mod tests {
                 (404, "application/json", br#"{}"#.to_vec())
             }
         } else if method == "PUT"
-            && (path.starts_with("/upload/artifacts/") || path == "/upload/run-manifest")
+            && (path.starts_with("/upload/artifacts/")
+                || path == "/upload/run-manifest"
+                || path == "/upload/publications")
         {
             (200, "application/json", br#"{}"#.to_vec())
         } else if method == "POST" && path == "/upload/bundle-ack" {
@@ -1430,6 +1451,300 @@ printf '%s\n' '{{"sequence":0,"created_at":"2026-07-18T00:00:00Z","type":"run_st
             }));
         }
         tokio::fs::remove_dir_all(root).await.ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn graph_simulator_publishes_before_downstream_failure() {
+        let root = unique_test_root("early-publication");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let digest = format_digest(Sha256::digest(b"early-image").as_slice());
+        let release = root.join("release-worker");
+        let script = format!(
+            r#"#!/bin/sh
+run_dir=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--run-dir" ]; then shift; run_dir="$1"; fi
+  shift
+done
+mkdir -p "$run_dir/outputs"
+printf '%s' 'early-image' > "$run_dir/outputs/image.png"
+cat > "$run_dir/run.json" <<'JSON'
+{{"contract_version":"mere.run/graph-run.v1","job_id":"job-early","graph_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"running","outputs":[],"nodes":[{{"id":"image","state":"finished","artifacts":[{{"name":"image","kind":"file","path":"outputs/image.png","content_type":"image/png","size_bytes":11,"sha256":"{digest}"}}]}},{{"id":"video","state":"running","artifacts":[]}}]}}
+JSON
+printf '%s\n' '{{"sequence":0,"created_at":"2026-09-05T00:00:00Z","type":"node_finished","node_id":"image","state":"finished"}}'
+while [ ! -f '{}' ]; do sleep 0.05; done
+printf '%s\n' 'downstream video failed' >&2
+exit 9
+"#,
+            release.display()
+        );
+        let worker = write_fake_worker(&root, &script).await;
+        let (_, documents) = bundle_files("http://unused");
+        let relay = start_test_relay(documents).await;
+        let (files, _) = bundle_files(&relay.base_url);
+        let base = format!("{}/upload", relay.base_url);
+        let cache = root.join("cache");
+        let private = root.join("private");
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let (_cancel, cancel) = watch::channel(false);
+        let execution = tokio::spawn(async move {
+            execute_with_runtime(
+                "job-early",
+                &files,
+                &base,
+                events,
+                cancel,
+                &ExecutionPolicy::default(),
+                GraphRuntime {
+                    binary: &worker,
+                    cache_root: &cache,
+                    private_root: &private,
+                },
+            )
+            .await
+        });
+        let publication = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let found = relay
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|request| request.path == "/upload/publications")
+                    .map(|request| serde_json::from_slice::<Value>(&request.body).unwrap());
+                if let Some(found) = found {
+                    break found;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("media must publish before the downstream node exits");
+        assert!(!execution.is_finished());
+        assert_eq!(publication["run_manifest"]["state"], "running");
+        assert_eq!(publication["artifacts"][0]["sha256"], digest);
+        assert_eq!(publication["artifacts"][0]["kind"], "graph.node-output");
+        assert_eq!(receiver.recv().await.unwrap()["type"], "node_finished");
+        tokio::fs::write(&release, b"continue").await.unwrap();
+        let error = execution
+            .await
+            .unwrap()
+            .err()
+            .expect("downstream failure must remain a failure");
+        assert!(error.to_string().contains("downstream video failed"));
+        assert!(relay.requests.lock().unwrap().iter().any(|request| request
+            .path
+            .starts_with("/upload/artifacts/_live-image-")
+            && request.body == b"early-image"));
+        relay.stop().await;
+        tokio::fs::remove_dir_all(root).await.ok();
+    }
+
+    #[tokio::test]
+    async fn graph_simulator_snapshots_replaced_previews_and_stops_on_cancel() {
+        let root = unique_test_root("preview-snapshots");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let manifest = serde_json::json!({"contract_version": "mere.run/graph-run.v1",
+            "job_id": "job-preview", "graph_fingerprint": "a".repeat(64), "state": "running",
+            "nodes": [{"id": "image", "state": "running", "artifacts": []}], "outputs": []});
+        tokio::fs::write(
+            root.join("run.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .await
+        .unwrap();
+        let relay = start_test_relay(BTreeMap::new()).await;
+        let queue = publication::PublicationQueue::start(
+            format!("{}/upload", relay.base_url),
+            root.clone(),
+        )
+        .unwrap();
+        let event = serde_json::json!({"type": "preview_ready", "node_id": "image", "sequence": 4,
+            "artifact": {"path": "preview.png", "content_type": "image/png"}});
+        for (index, bytes) in [b"first-frame".as_slice(), b"second-frame".as_slice()]
+            .iter()
+            .enumerate()
+        {
+            tokio::fs::write(root.join("preview.png"), bytes)
+                .await
+                .unwrap();
+            queue.observe(&event);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let count = relay
+                        .requests
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|request| request.path == "/upload/publications")
+                        .count();
+                    if count > index {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("each preview must publish");
+        }
+        queue.cancel().await;
+        let diagnostic = publication::pending_event(event);
+        assert_eq!(diagnostic["type"], "node_diagnostic");
+        assert_eq!(diagnostic["sequence"], 4);
+        assert!(diagnostic.get("artifact").is_none());
+        {
+            let requests = relay.requests.lock().unwrap();
+            let uploads = requests
+                .iter()
+                .filter(|request| request.path.starts_with("/upload/artifacts/_live-image-"))
+                .collect::<Vec<_>>();
+            assert_eq!(uploads.len(), 2);
+            assert_ne!(uploads[0].path, uploads[1].path);
+            assert_eq!(uploads[0].body, b"first-frame");
+            assert_eq!(uploads[1].body, b"second-frame");
+            for request in requests
+                .iter()
+                .filter(|request| request.path == "/upload/publications")
+            {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(body["artifacts"][0]["kind"], "graph.preview");
+                assert_eq!(body["run_manifest"]["nodes"][0]["state"], "running");
+            }
+        }
+        relay.stop().await;
+        tokio::fs::remove_dir_all(root).await.ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires an exported image/video graph and installed inference models"]
+    async fn graph_simulator_real_inference_publishes_before_failure() {
+        let bundle = PathBuf::from(
+            std::env::var("GRAPH_MEDIA_ACCEPTANCE_BUNDLE")
+                .expect("set GRAPH_MEDIA_ACCEPTANCE_BUNDLE"),
+        );
+        let evidence = PathBuf::from(
+            std::env::var("GRAPH_MEDIA_ACCEPTANCE_EVIDENCE")
+                .expect("set GRAPH_MEDIA_ACCEPTANCE_EVIDENCE"),
+        );
+        let binary = PathBuf::from(
+            std::env::var("GRAPH_MEDIA_ACCEPTANCE_RUNTIME")
+                .expect("set GRAPH_MEDIA_ACCEPTANCE_RUNTIME"),
+        );
+        let mut documents = BTreeMap::new();
+        for name in ["job.json", "graph.json", "inputs.json", "assets.json"] {
+            documents.insert(
+                name.to_string(),
+                tokio::fs::read(bundle.join(name)).await.unwrap(),
+            );
+        }
+        let job: Value = serde_json::from_slice(&documents["job.json"]).unwrap();
+        let job_id = job["job_id"].as_str().unwrap().to_string();
+        let relay = start_test_relay(documents.clone()).await;
+        let files = documents
+            .into_iter()
+            .map(|(path, bytes)| GraphBundleFile {
+                url: format!("{}/bundle/{path}", relay.base_url),
+                path,
+                sha256: format_digest(Sha256::digest(&bytes).as_slice()),
+                size_bytes: bytes.len() as u64,
+            })
+            .collect::<Vec<_>>();
+        let base = format!("{}/upload", relay.base_url);
+        let cache = evidence.join("cache");
+        let private = evidence.join("private");
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let (_cancel, cancel) = watch::channel(false);
+        let execution = tokio::spawn(async move {
+            execute_with_runtime(
+                &job_id,
+                &files,
+                &base,
+                events,
+                cancel,
+                &ExecutionPolicy::default(),
+                GraphRuntime {
+                    binary: &binary,
+                    cache_root: &cache,
+                    private_root: &private,
+                },
+            )
+            .await
+        });
+        let started = Instant::now();
+        let mut early_ms = None;
+        while !execution.is_finished() {
+            while let Ok(event) = receiver.try_recv() {
+                eprintln!(
+                    "Acceptance event: {} {} {}",
+                    event["type"], event["node_id"], event["state"]
+                );
+            }
+            if early_ms.is_none()
+                && relay
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|request| request.path == "/upload/publications")
+            {
+                early_ms = Some(elapsed_milliseconds(started));
+                eprintln!("Verified image publication observed while graph execution is active");
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(300),
+                "real inference exceeded five minutes"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let error = execution
+            .await
+            .unwrap()
+            .err()
+            .expect("the downstream timeout must fail the graph");
+        eprintln!("Acceptance terminal result: {error}");
+        assert!(
+            early_ms.is_some(),
+            "real media must upload before downstream failure"
+        );
+        let (image, publication) = {
+            let requests = relay.requests.lock().unwrap();
+            let image = requests
+                .iter()
+                .find(|request| request.path.starts_with("/upload/artifacts/_live-image-"))
+                .expect("image upload must exist")
+                .body
+                .clone();
+            let publication = requests
+                .iter()
+                .find(|request| request.path == "/upload/publications")
+                .unwrap()
+                .body
+                .clone();
+            (image, publication)
+        };
+        assert!(
+            image.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "acceptance must produce a real PNG"
+        );
+        tokio::fs::create_dir_all(&evidence).await.unwrap();
+        tokio::fs::write(evidence.join("image.png"), &image)
+            .await
+            .unwrap();
+        tokio::fs::write(evidence.join("publication.json"), publication)
+            .await
+            .unwrap();
+        let report = serde_json::json!({"early_publication_ms": early_ms, "total_ms": elapsed_milliseconds(started),
+            "image_sha256": format_digest(Sha256::digest(&image).as_slice()), "terminal_error": error.to_string(),
+            "transport": "Node uploader to loopback Relay fixture", "inference": "installed mere.run runtime"});
+        tokio::fs::write(
+            evidence.join("verification.json"),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .await
+        .unwrap();
+        relay.stop().await;
     }
 
     #[cfg(unix)]
