@@ -2,8 +2,9 @@
 
 The relay brokers immutable `mere.run` workflow bundles as a first-class work
 kind. Graph jobs are independent from image, media, chat, and plugin tool jobs.
-The complete graph is placed on one compatible node so intermediate artifacts
-remain local to that machine.
+The complete graph is placed on one compatible node so downstream nodes reuse
+intermediate artifacts on that machine. Hosted media previews are verified
+copies of those local files.
 
 Graphs that require private input and log custody must explicitly select
 [`local-custody.v1`](local-custody.md). That policy replaces the portable R2
