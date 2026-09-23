@@ -96,6 +96,7 @@ impl LiveAsrSessions {
             }
         }
 
+        crate::resident_video::close().await;
         let binary = mererun::resolve_mere_run_binary().await;
         let mut command = Command::new(binary);
         command

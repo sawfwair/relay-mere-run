@@ -549,6 +549,18 @@ pub struct JobRequest {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub variant: Option<String>,
+    #[serde(default)]
+    pub guidance_scale: Option<f32>,
+    #[serde(default)]
+    pub shift: Option<f32>,
+    #[serde(default)]
+    pub adapter_selections: Vec<Value>,
+    #[serde(default)]
+    pub continuity: Option<Value>,
+    #[serde(default)]
+    pub keyframes: Vec<Value>,
+    #[serde(default)]
     pub duration_seconds: Option<f64>,
     #[serde(default)]
     pub fps: Option<u32>,

@@ -52,6 +52,41 @@ afterEach(() => {
 });
 
 describe('relay regressions', () => {
+  it('forwards Animatic video controls to the assigned Node', async () => {
+    const userId = newUserId('video-controls');
+    const { relay, ws } = await connectAgent(
+      userId,
+      capabilitiesWithModels(['video-ltx25-distilled-bf16'])
+    );
+    try {
+      const controls = {
+        variant: 'unified-av' as const,
+        guidance_scale: 1,
+        shift: 1,
+        adapter_selections: [{ id: 'character-look' }],
+        continuity: { mode: 'windowed', window_seconds: 5, overlap_seconds: 1 },
+        keyframes: [{ time_seconds: 2, prompt: 'the ferry departs' }],
+      };
+      const response = await submitJob(relay, userId, {
+        kind: 'video',
+        prompt: 'the ferry departs',
+        model: 'video-ltx25-distilled-bf16',
+        width: 768,
+        height: 448,
+        steps: 8,
+        duration_seconds: 5,
+        fps: 24,
+        ...controls,
+      });
+      expect(response.status).toBe(200);
+      const message = await waitForWebSocketJson<JsonRecord>(ws);
+      expect(message.type).toBe('job');
+      expect(message.request).toMatchObject(controls);
+    } finally {
+      closeWebSocket(ws);
+    }
+  });
+
   it('accepts oversized inventory updates without losing tool placement or the durable graph catalog', async () => {
     const userId = newUserId('inventory-attachment');
     const { relay, ws } = await connectAgent(userId, capabilitiesWithModels([]));

@@ -40,6 +40,15 @@ The Rust core (`src-tauri/src/`) is the relay device agent:
   Live ASR advertises only installed Parakeet and Qwen backends. Relay resolves
   automatic stream tickets to a ready backend before audio starts, while
   explicit requests remain pinned through the Node protocol and child command.
+- `resident_video.rs` — keeps an installed LTX 2.5 distilled unified-AV model
+  loaded between compatible Relay video jobs. It uses the `mere.run video session`
+  JSONL contract, checks the result file, and closes the child after two idle
+  minutes, a disconnect, or a different workload. Jobs with source audio,
+  adapters, reference images, keyframes, or other unsupported controls use the
+  one-shot video command. The resident lane requires an explicit
+  `variant: unified-av`; the one-shot command receives that selector too, so
+  both paths produce synchronized audio and video. A `mere.run` binary without
+  the session contract also uses the one-shot command.
 - `plugins.rs` — discovers the managed companion packs on `PATH` plus exact
   operator-approved executables in the private plugin registry, probes
   `manifest --json`, advertises their commands in relay capabilities, runs
@@ -65,6 +74,10 @@ The Rust core (`src-tauri/src/`) is the relay device agent:
 
 The React console (`src/App.tsx`) is a calm dashboard: connection status, the
 device's models, a live job feed, and a log.
+
+For this video path, deploy the Relay Worker before installing Node 0.2.23.
+Older Workers drop Animatic's `variant` field before dispatch, so the updated
+Node cannot select unified AV or the resident session until Relay forwards it.
 
 ## Run
 

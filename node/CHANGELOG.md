@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.2.23 - 2026-09-22
+
+- Reuse the installed LTX 2.5 distilled unified-AV model across compatible
+  Relay video jobs, including Animatic draft shots. Keep advanced jobs on the
+  existing one-shot path and release the resident process when it is idle or
+  the Node disconnects.
+- Preserve video render controls through Relay so the Node can select the
+  resident path only when its JSONL request represents the submitted job. Pass
+  `variant: unified-av` to the one-shot fallback as well, preserving Animatic's
+  requested audio/video lane.
+
 ## 0.2.17 - 2026-08-06
 
 - Discover exact operator-approved application companions from the private

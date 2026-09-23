@@ -882,16 +882,22 @@ pub async fn generate_job_output(
     progress: Option<ProgressSender>,
 ) -> Result<GeneratedOutput> {
     match req.kind {
-        JobKind::Image => Ok(GeneratedOutput {
-            path: generate_image(req, out_dir, job_id, progress).await?,
-            content_type: "image/png",
-            kind: "image",
-        }),
-        JobKind::Music => Ok(GeneratedOutput {
-            path: generate_music(req, out_dir, job_id).await?,
-            content_type: "audio/wav",
-            kind: "music",
-        }),
+        JobKind::Image => {
+            crate::resident_video::close().await;
+            Ok(GeneratedOutput {
+                path: generate_image(req, out_dir, job_id, progress).await?,
+                content_type: "image/png",
+                kind: "image",
+            })
+        }
+        JobKind::Music => {
+            crate::resident_video::close().await;
+            Ok(GeneratedOutput {
+                path: generate_music(req, out_dir, job_id).await?,
+                content_type: "audio/wav",
+                kind: "music",
+            })
+        }
         JobKind::Video => Ok(GeneratedOutput {
             path: generate_video(req, out_dir, job_id).await?,
             content_type: "video/mp4",
@@ -1059,6 +1065,10 @@ fn build_video_generate_args(
         req.height.to_string().into(),
         "--quiet".into(),
     ];
+    if let Some(variant) = req.variant.as_deref() {
+        args.push("--variant".into());
+        args.push(variant.into());
+    }
     if let Some(duration) = req.duration_seconds {
         args.push("--duration".into());
         args.push(duration.to_string().into());
@@ -1141,7 +1151,24 @@ pub async fn generate_video(req: &JobRequest, out_dir: &Path, job_id: &str) -> R
         None
     };
 
-    let mut cmd = Command::new(resolve_mere_run_binary().await);
+    let binary = resolve_mere_run_binary().await;
+    if let Some(request) = crate::resident_video::request(
+        req,
+        &model,
+        job_id,
+        &out_path,
+        input_path.as_deref(),
+        end_path.as_deref(),
+    ) {
+        if crate::resident_video::generate(&binary, &request, &out_path)
+            .await?
+            .is_some()
+        {
+            return Ok(out_path);
+        }
+    }
+    crate::resident_video::close().await;
+    let mut cmd = Command::new(binary);
     cmd.args(build_video_generate_args(
         req,
         &model,
@@ -2845,6 +2872,34 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
                 "90.5"
             ]
         );
+    }
+
+    #[test]
+    fn keeps_animatic_unified_av_on_the_one_shot_fallback() {
+        let req: JobRequest = serde_json::from_value(serde_json::json!({
+            "kind": "video",
+            "prompt": "the ferry departs",
+            "model": "video-ltx25-distilled-bf16",
+            "variant": "unified-av",
+            "width": 448,
+            "height": 768,
+            "duration_seconds": 5,
+        }))
+        .expect("video job");
+        let args = build_video_generate_args(
+            &req,
+            "video-ltx25-distilled-bf16",
+            Path::new("/tmp/ferry.mp4"),
+            None,
+            None,
+            None,
+        );
+        let rendered: Vec<String> = args
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let variant_at = rendered.iter().position(|arg| arg == "--variant").unwrap();
+        assert_eq!(rendered[variant_at + 1], "unified-av");
     }
 
     #[test]
