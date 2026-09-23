@@ -331,6 +331,12 @@ export interface JobRequest {
   // --ref-image. Distinct from input_image_* (img2img). URLs the agent fetches.
   reference_image_urls: string[] | null;
   model?: string;
+  variant?: 'distilled' | 'unified-av';
+  guidance_scale?: number;
+  shift?: number;
+  adapter_selections?: Array<Record<string, unknown>>;
+  continuity?: { mode: string; [key: string]: unknown };
+  keyframes?: Array<{ time_seconds: number; prompt?: string; image_url?: string; [key: string]: unknown }>;
   duration_seconds?: number;
   fps?: number;
   num_frames?: number;
@@ -981,6 +987,12 @@ export interface SubmitJobRequest {
   webhook_url?: string;
   direct_image?: boolean; // if true, return base64 instead of R2 URL
   model?: string;
+  variant?: 'distilled' | 'unified-av';
+  guidance_scale?: number;
+  shift?: number;
+  adapter_selections?: Array<Record<string, unknown>>;
+  continuity?: { mode: string; [key: string]: unknown };
+  keyframes?: Array<{ time_seconds: number; prompt?: string; image_url?: string; [key: string]: unknown }>;
   duration_seconds?: number;
   fps?: number;
   num_frames?: number;

@@ -14,6 +14,7 @@ mod native_video;
 mod plugins;
 mod process_activity;
 mod protocol;
+mod resident_video;
 mod runtime_binary;
 mod work_gate;
 

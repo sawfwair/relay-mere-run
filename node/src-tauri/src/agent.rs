@@ -324,7 +324,10 @@ pub async fn run_agent<R: Runtime>(
             }),
         );
 
-        if let Err(e) = connect_and_serve(&app, &config, &device_id, &work_gate, &mut stop).await {
+        let connection_result =
+            connect_and_serve(&app, &config, &device_id, &work_gate, &mut stop).await;
+        crate::resident_video::close().await;
+        if let Err(e) = connection_result {
             let error_message = e.to_string();
             if let Some(message) = auth_required_message(&error_message) {
                 deviceauth::clear(&config.auth_path);
@@ -1030,6 +1033,7 @@ async fn handle_server_message<R: Runtime>(
             request,
         } => {
             let _work_permit = work_gate.acquire("relay", &embed_id).await;
+            crate::resident_video::close().await;
             emit(
                 app,
                 "node:job",
@@ -1073,6 +1077,7 @@ async fn handle_server_message<R: Runtime>(
             request,
         } => {
             let _work_permit = work_gate.acquire("relay", &tool_id).await;
+            crate::resident_video::close().await;
             emit(
                 app,
                 "node:job",
@@ -1168,6 +1173,7 @@ async fn handle_server_message<R: Runtime>(
             let app = app.clone();
             tokio::spawn(async move {
                 let _work_permit = gate.acquire("relay", &forward_job_id).await;
+                crate::resident_video::close().await;
                 emit(
                     &app,
                     "node:job",
@@ -1327,6 +1333,7 @@ async fn handle_server_message<R: Runtime>(
             tokio::spawn(async move {
                 let gate_work_id = format!("model-plan:{forward_plan_id}");
                 let _work_permit = gate.acquire("relay", &gate_work_id).await;
+                crate::resident_video::close().await;
                 emit(
                     &app,
                     "node:job",
@@ -1496,6 +1503,7 @@ async fn execute_asr_request<R: Runtime>(
         active.insert(asr_id.clone(), cancel_tx);
     }
     let _work_permit = context.work_gate.acquire("relay", &asr_id).await;
+    crate::resident_video::close().await;
     emit(
         context.app,
         "node:job",
@@ -1594,6 +1602,7 @@ async fn handle_chat_server_message<R: Runtime>(
             request,
         } => {
             let _work_permit = work_gate.acquire("relay", &chat_id).await;
+            crate::resident_video::close().await;
             let (cancel_tx, cancel_rx) = watch::channel(false);
             active_chats.lock().await.insert(chat_id.clone(), cancel_tx);
             emit(
@@ -1717,6 +1726,7 @@ async fn execute_talk_request<R: Runtime>(
     }
 
     let _work_permit = context.work_gate.acquire("relay", &talk_id).await;
+    crate::resident_video::close().await;
     emit(
         context.app,
         "node:job",
@@ -1865,6 +1875,7 @@ async fn execute_ocr_request<R: Runtime>(
     }
 
     let _work_permit = context.work_gate.acquire("relay", &ocr_id).await;
+    crate::resident_video::close().await;
     emit(
         context.app,
         "node:job",
