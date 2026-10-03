@@ -87,6 +87,8 @@ describe('relay browser auth', () => {
       .intercept({ path: '/.well-known/jwks.json', method: 'GET' })
       .reply(200, { keys: [publicJwk] });
 
+    fetchMock.get(env.BROKER_ORIGIN).intercept({ path: '/api/auth/app/admission', method: 'POST' }).reply(200, { allowed: true }).persist();
+
     const start = await SELF.fetch(new Request(
       'https://relay.example/auth/start?return_to=%2F',
       { redirect: 'manual' }

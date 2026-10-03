@@ -8,6 +8,7 @@ export interface Env {
   MERE_RUN_WEB_URL: string;
   MERE_RUN_ASSET_BASE_URL: string;
   BROKER_ORIGIN: string;
+  AUTH_INTERNAL_TOKEN?: string | { get(): Promise<string> };
   // Plain string when set as a var/worker-secret; a Secrets Store binding hands
   // over a { get() } accessor instead — signWebhookPayload() resolves both.
   WEBHOOK_SIGNING_SECRET: string | { get(): Promise<string> };

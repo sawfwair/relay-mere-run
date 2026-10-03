@@ -18,6 +18,7 @@ binding = "IMAGES"
 bucket_name = "test-assets"
 
 [vars]
+AUTH_INTERNAL_TOKEN = "test-auth-internal"
 MERE_RUN_WEB_URL = "https://console.example.test"
 MERE_RUN_ASSET_BASE_URL = "https://assets.example.test/media"
 BROKER_ORIGIN = "https://identity.example.test"

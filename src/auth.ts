@@ -4,13 +4,16 @@ import {
   jwtVerify,
   type FetchImplementation,
   type JWTVerifyGetKey,
+  type JWTPayload,
 } from 'jose';
 import type { Env, AuthResult } from './types';
 import { executionGrantFromClaims } from './execution-grant';
+import { readResponseJson } from './json';
+import { z } from 'zod';
 
 // mere.world issues brokered access tokens as RS256 JWTs (better-auth jwt
-// plugin). We validate them statelessly against the broker's JWKS — no userinfo
-// round-trip, no shared secret. `createRemoteJWKSet` fetches and caches the keys.
+// plugin). JWKS verifies the signature; World admission checks current app
+// access on each request. `createRemoteJWKSet` caches only the public keys.
 let jwks: JWTVerifyGetKey | null = null;
 let jwksOrigin: string | null = null;
 
@@ -80,6 +83,41 @@ function parseBearerToken(request: Request): string | null {
   return null;
 }
 
+/** Account tokens require Relay access. Bounded execution tokens retain their
+ * source app's admission and their existing operation restrictions. */
+async function currentRelayAdmission(env: Env, userId: string, clientId: string): Promise<boolean> {
+  const origins: Record<string, string> = {
+    'mererun-relay': 'https://relay.mere.run',
+    'mererun-studio': 'https://studio.mere.run',
+    'mererun-node': env.BROKER_ORIGIN,
+    'mererun-ios': env.BROKER_ORIGIN,
+    you: 'https://you.sawfwair.com',
+    shade: 'https://shade.sawfwair.com',
+  };
+  const audienceOrigin = origins[clientId];
+  if (!audienceOrigin) return false;
+  try {
+    const binding = env.AUTH_INTERNAL_TOKEN;
+    const token = (typeof binding === 'string' ? binding : await binding?.get())?.trim();
+    if (!token) return false;
+    const response = await fetch(new URL('/api/auth/app/admission', env.BROKER_ORIGIN), {
+      method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, clientId, audienceOrigin }),
+    });
+    if (!response.ok) return false;
+    const body = await readResponseJson(response, z.object({ allowed: z.boolean() }));
+    return body.allowed;
+  } catch { return false; }
+}
+
+async function sourceAppAdmission(env: Env, payload: JWTPayload): Promise<boolean> {
+  const audiences = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+  const sources = audiences.filter((audience): audience is string => audience === 'mererun-studio' || audience === 'mererun-ios');
+  if (payload.client_id === 'mererun-node') sources.push('mererun-node');
+  const admissions = await Promise.all(sources.map((source) => currentRelayAdmission(env, String(payload.sub), source)));
+  return admissions.every(Boolean);
+}
+
 /**
  * Verify a brokered JWT and resolve it to its owner. `jwtVerify` checks the
  * signature (via JWKS), expiry, issuer, and Relay audience; `sub` is the stable
@@ -90,15 +128,18 @@ export async function verifyBrokerToken(token: string, env: Env): Promise<AuthRe
     try {
       const { payload } = await jwtVerify(token, getJwks(env.BROKER_ORIGIN), {
         issuer: env.BROKER_ORIGIN,
-        audience: 'mere-run-relay',
+        audience: ['mere-run-relay', 'mererun-relay', 'mererun-studio', 'mererun-ios'],
         requiredClaims: ['sub', 'exp'],
       });
       if (typeof payload.sub === 'string' && payload.sub) {
+        const executionGrant = executionGrantFromClaims(payload);
+        if (!(await currentRelayAdmission(env, payload.sub, executionGrant ? String(payload.client_id) : 'mererun-relay'))) return null;
+        if (!executionGrant && !(await sourceAppAdmission(env, payload))) return null;
         return {
           user_id: payload.sub,
           email: typeof payload.email === 'string' ? payload.email : undefined,
           name: typeof payload.name === 'string' ? payload.name : undefined,
-          execution_grant: executionGrantFromClaims(payload),
+          execution_grant: executionGrant,
         };
       }
       return null;
@@ -134,7 +175,8 @@ async function authenticateBrokerToken(request: Request, env: Env): Promise<Auth
  */
 export async function authenticateAgent(request: Request, env: Env): Promise<AuthResult | null> {
   const auth = await authenticateBrokerToken(request, env);
-  return auth?.execution_grant ? null : auth;
+  if (!auth || auth.execution_grant) return null;
+  return await currentRelayAdmission(env, auth.user_id, 'mererun-node') ? auth : null;
 }
 
 /**
