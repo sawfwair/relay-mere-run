@@ -1,7 +1,8 @@
 import { SELF, env } from 'cloudflare:test';
+import { z } from 'zod';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { clearJwksCache, isTransientJwksError, verifyBrokerToken } from '../src/auth';
+import { authenticateAgent, clearJwksCache, isTransientJwksError, verifyBrokerToken } from '../src/auth';
 
 afterEach(() => {
   clearJwksCache();
@@ -40,7 +41,7 @@ describe('relay broker authentication', () => {
     const { privateKey, publicKey } = await generateKeyPair('RS256');
     const publicJwk = await exportJWK(publicKey);
     const issuer = `https://broker-${crypto.randomUUID()}.example`;
-    vi.stubGlobal('fetch', vi.fn(() => Response.json({
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/app/admission') ? Response.json({ allowed: true }) : Response.json({
       keys: [{ ...publicJwk, kid: 'relay-test', alg: 'RS256', use: 'sig' }],
     })));
     const sign = (claims: { aud: string; iss?: string; sub?: string; expiresIn?: string }) =>
@@ -71,4 +72,69 @@ describe('relay broker authentication', () => {
       authEnv
     )).resolves.toBeNull();
   });
+  it('rechecks World admission for the same live token and fails closed on outages', async () => {
+    const { privateKey, publicKey } = await generateKeyPair('RS256');
+    const publicJwk = await exportJWK(publicKey);
+    const issuer = `https://broker-${crypto.randomUUID()}.example`;
+    let allowed: unknown = true;
+    let unavailable = false;
+    const fetcher = vi.fn((url, init?: RequestInit) => {
+      if (String(url).includes('/app/admission')) {
+        if (unavailable) return Promise.reject(new Error('offline'));
+        expect(JSON.parse(typeof init?.body === 'string' ? init.body : 'null')).toEqual({ userId: 'mere-user-1', clientId: 'mererun-relay', audienceOrigin: 'https://relay.mere.run' });
+        return Promise.resolve(Response.json({ allowed }));
+      }
+      return Promise.resolve(Response.json({ keys: [{ ...publicJwk, kid: 'revocation-test', alg: 'RS256', use: 'sig' }] }));
+    });
+    vi.stubGlobal('fetch', fetcher);
+    const token = await new SignJWT({ email: 'owner@example.com' }).setProtectedHeader({ alg: 'RS256', kid: 'revocation-test' })
+      .setIssuer(issuer).setAudience('mere-run-relay').setSubject('mere-user-1').setIssuedAt().setExpirationTime('5m').sign(privateKey);
+    const authEnv = { ...env, BROKER_ORIGIN: issuer };
+    expect(await verifyBrokerToken(token, authEnv)).toMatchObject({ user_id: 'mere-user-1' });
+    allowed = false;
+    expect(await verifyBrokerToken(token, authEnv)).toBeNull();
+    allowed = 'true';
+    expect(await verifyBrokerToken(token, authEnv)).toBeNull();
+    allowed = true;
+    unavailable = true;
+    expect(await verifyBrokerToken(token, authEnv)).toBeNull();
+    unavailable = false;
+    expect(await verifyBrokerToken(token, { ...authEnv, AUTH_INTERNAL_TOKEN: undefined })).toBeNull();
+    expect(await verifyBrokerToken(token, authEnv)).toMatchObject({ user_id: 'mere-user-1' });
+  });
+
+  it('requires both Relay and source-app access for Studio, iOS, and Node tokens', async () => {
+    const { privateKey, publicKey } = await generateKeyPair('RS256');
+    const publicJwk = await exportJWK(publicKey);
+    const issuer = `https://broker-${crypto.randomUUID()}.example`;
+    const allowed = new Set(['mererun-relay', 'mererun-studio', 'mererun-ios']);
+    vi.stubGlobal('fetch', vi.fn((url, init?: RequestInit) => {
+      if (String(url).includes('/app/admission')) {
+        const body = z.object({ clientId: z.string(), audienceOrigin: z.string() }).parse(JSON.parse(typeof init?.body === 'string' ? init.body : 'null') as unknown);
+        expect(body.audienceOrigin).toBe(body.clientId === 'mererun-relay' ? 'https://relay.mere.run'
+          : body.clientId === 'mererun-studio' ? 'https://studio.mere.run' : issuer);
+        return Promise.resolve(Response.json({ allowed: allowed.has(body.clientId) }));
+      }
+      return Promise.resolve(Response.json({ keys: [{ ...publicJwk, kid: 'source-test', alg: 'RS256', use: 'sig' }] }));
+    }));
+    const authEnv = { ...env, BROKER_ORIGIN: issuer };
+    for (const source of ['mererun-studio', 'mererun-ios', 'mererun-node']) {
+      allowed.add(source);
+      const token = await new SignJWT({ client_id: source }).setProtectedHeader({ alg: 'RS256', kid: 'source-test' })
+        .setIssuer(issuer).setAudience(source === 'mererun-node' ? 'mere-run-relay' : source)
+        .setSubject('mere-user-1').setIssuedAt().setExpirationTime('5m').sign(privateKey);
+      expect(await verifyBrokerToken(token, authEnv)).toMatchObject({ user_id: 'mere-user-1' });
+      allowed.delete(source);
+      expect(await verifyBrokerToken(token, authEnv)).toBeNull();
+      allowed.add(source); allowed.delete('mererun-relay');
+      expect(await verifyBrokerToken(token, authEnv)).toBeNull();
+      allowed.add('mererun-relay');
+      allowed.delete('mererun-node');
+      const request = new Request('https://relay.mere.run/agent', { headers: { Authorization: `Bearer ${token}` } });
+      expect(await authenticateAgent(request, authEnv)).toBeNull();
+      allowed.add('mererun-node');
+      expect(await authenticateAgent(request, authEnv)).toMatchObject({ user_id: 'mere-user-1' });
+    }
+  });
+
 });

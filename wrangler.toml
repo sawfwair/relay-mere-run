@@ -44,3 +44,6 @@ ASR_STREAMING_ENABLED = "true"
 # Provision production secrets outside Git, for example:
 #   wrangler secret put WEBHOOK_SIGNING_SECRET
 #   wrangler secret put ASR_STREAM_TICKET_SECRET
+
+# Required for current app admission in production. Add the AUTH_INTERNAL_TOKEN
+# Secrets Store binding to the private deploy config (or provision a Worker secret).
