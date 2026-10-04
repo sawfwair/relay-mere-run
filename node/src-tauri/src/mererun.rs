@@ -825,14 +825,14 @@ fn push_tail(tail: &mut Vec<u8>, chunk: &[u8]) {
     }
 }
 
-/// Own the image process group and its output drain for cancellation-safe drops.
-struct ImageProcessGuard {
+/// Own the generation process group and its output drain for cancellation-safe drops.
+struct GenerationProcessGuard {
     process_id: u32,
     stdout_drain: tokio::task::JoinHandle<()>,
     armed: bool,
 }
 
-impl Drop for ImageProcessGuard {
+impl Drop for GenerationProcessGuard {
     fn drop(&mut self) {
         self.stdout_drain.abort();
         #[cfg(unix)]
@@ -850,6 +850,7 @@ impl Drop for ImageProcessGuard {
 async fn run_streaming_with_progress(
     mut cmd: Command,
     progress: Option<&ProgressSender>,
+    kind: &str,
 ) -> Result<std::process::ExitStatus> {
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -868,7 +869,7 @@ async fn run_streaming_with_progress(
     let stdout_drain = tokio::spawn(async move {
         let _ = tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await;
     });
-    let mut process_guard = ImageProcessGuard {
+    let mut process_guard = GenerationProcessGuard {
         process_id: child.id().ok_or_else(|| anyhow!("child pid unavailable"))?,
         stdout_drain,
         armed: true,
@@ -900,7 +901,7 @@ async fn run_streaming_with_progress(
     if !status.success() {
         let stderr_text = String::from_utf8_lossy(&tail);
         return Err(anyhow!(
-            "mere.run image generate failed: {}",
+            "mere.run {kind} generate failed: {}",
             stderr_text.trim()
         ));
     }
@@ -1017,7 +1018,7 @@ pub async fn generate_image(
         }
     }
 
-    run_streaming_with_progress(cmd, progress.as_ref()).await?;
+    run_streaming_with_progress(cmd, progress.as_ref(), "image").await?;
     if !out_path.exists() {
         return Err(anyhow!(
             "mere.run reported success but produced no file at {out_path:?}"
@@ -1147,6 +1148,16 @@ fn build_video_generate_args(
 }
 
 pub async fn generate_video(req: &JobRequest, out_dir: &Path, job_id: &str) -> Result<PathBuf> {
+    let binary = resolve_mere_run_binary().await;
+    generate_video_with_binary(req, out_dir, job_id, &binary).await
+}
+
+async fn generate_video_with_binary(
+    req: &JobRequest,
+    out_dir: &Path,
+    job_id: &str,
+    binary: &Path,
+) -> Result<PathBuf> {
     validate_video_end_image(req)?;
     tokio::fs::create_dir_all(out_dir).await.ok();
     let out_path = out_dir.join(format!("{job_id}.mp4"));
@@ -1183,7 +1194,6 @@ pub async fn generate_video(req: &JobRequest, out_dir: &Path, job_id: &str) -> R
         None
     };
 
-    let binary = resolve_mere_run_binary().await;
     if let Some(request) = crate::resident_video::request(
         req,
         &model,
@@ -1192,7 +1202,7 @@ pub async fn generate_video(req: &JobRequest, out_dir: &Path, job_id: &str) -> R
         input_path.as_deref(),
         end_path.as_deref(),
     ) {
-        if crate::resident_video::generate(&binary, &request, &out_path)
+        if crate::resident_video::generate(binary, &request, &out_path)
             .await?
             .is_some()
         {
@@ -1210,11 +1220,7 @@ pub async fn generate_video(req: &JobRequest, out_dir: &Path, job_id: &str) -> R
         audio_path.as_deref(),
     ));
 
-    let output = cmd.output().await?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("mere.run video generate failed: {}", stderr.trim()));
-    }
+    run_streaming_with_progress(cmd, None, "video").await?;
     if !out_path.exists() {
         return Err(anyhow!(
             "mere.run reported success but produced no file at {out_path:?}"
@@ -3398,7 +3404,8 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
             .arg("echo $$ > \"$1\"; exec sleep 30")
             .arg("image-test")
             .arg(&pid_file);
-        let task = tokio::spawn(async move { run_streaming_with_progress(command, None).await });
+        let task =
+            tokio::spawn(async move { run_streaming_with_progress(command, None, "image").await });
         let pid = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 if let Ok(text) = tokio::fs::read_to_string(&pid_file).await {
@@ -3450,7 +3457,8 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
             .arg("image-test")
             .arg(&started)
             .arg(&escaped);
-        let task = tokio::spawn(async move { run_streaming_with_progress(command, None).await });
+        let task =
+            tokio::spawn(async move { run_streaming_with_progress(command, None, "image").await });
         tokio::time::timeout(Duration::from_secs(3), async {
             while !started.exists() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3466,6 +3474,49 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
             "generation descendant survived cancellation"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn dropping_video_generation_terminates_descendants_and_late_output() {
+        use std::time::Duration;
+        let dir = std::env::temp_dir().join(format!("mere-video-cancel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let started = dir.join("started");
+        let output = dir.join("cancel-video.mp4");
+        let binary = dir.join("fake-video");
+        let _ = std::fs::remove_file(&started);
+        let _ = std::fs::remove_file(&output);
+        write_fake_cli(
+            &binary,
+            &format!(
+                "#!/bin/sh\n(sleep 0.5; echo late > '{}') & echo ready > '{}'; wait\n",
+                output.display(),
+                started.display(),
+            ),
+        );
+        let task_dir = dir.clone();
+        let task = tokio::spawn(async move {
+            let mut req = image_job_request();
+            req.kind = JobKind::Video;
+            req.model = Some("video-one-shot-test".to_string());
+            generate_video_with_binary(&req, &task_dir, "cancel-video", &binary).await
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("video subtree never started");
+        task.abort();
+        let _ = task.await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let leaked = output.exists();
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(
+            !leaked,
+            "video descendant produced output after cancellation"
+        );
     }
 
     /// End-to-end at the process boundary: a fake `mere.run` streams progress

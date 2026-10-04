@@ -128,22 +128,32 @@ Set `MERERUN_NODE_HOSTING_KIND` explicitly to `workstation`, `runpod`, `other`, 
 The shared enrollment and inventory protocol carries `capabilities.hosting` with `source: "owner-declared"`. Relay validates that bounded declaration and returns it in the authenticated account's status inventory. It is an owner's declaration, not provider verification. The label is descriptive configuration; never place credentials in it. Canceling an inference job does not stop a RunPod Pod or its storage billing.
 
 The current release pin is [release-image.json](release-image.json):
-`sha256:12d482ce8c9f50a46b60a13eb832dfba2c525aafa4b1c1d8686f46b427faa2db`,
+`sha256:458e435c539cec768361fab6c8f4707e4ced46eb45648aaf67086ef8b26da440`,
 Linux daemon SHA256
-`fd94712054391ee0bb7819959e0d0d614ffa0f3ea702d34088186f855fd2183d`.
+`778f0e3bce25c884405b3161def6a8063ce92d5e48d410e41df5b2e9268317d7`.
 Its runtime source and OCI revision label are commit
-`125a6e250308fd6375c4d33ae2cbd35d6c9ef2e2`; the later release-pin commit only
+`4c3c3245875df1ec106b1f4e84ff30c50d201965`; the later release-pin commit only
 records that build and changes the host-side controller default, not image inputs.
 All 30 source/recipe inputs matched the runtime source commit. The pinned CUDA
 archive checksum was verified before building.
 
-That source passed full Worker/web, macOS Rust, and Linux Rust/package CI in
-[run 37214097733](https://github.com/sawfwair/relay-mere-run/actions/runs/37214097733).
-The generation handler was extracted to satisfy the existing Clippy threshold;
-its execution body is unchanged apart from whitespace. Local desktop tests pass
-135/6 ignored and headless tests pass 130/6 ignored. The rebuilt image passed help,
-private bootstrap, ineffective-permission rejection, and expected rejection of
-unenrolled startup/health. These are CPU/container checks, not a new GPU run.
+Source CI is tracked in
+[run 37218005413](https://github.com/sawfwair/relay-mere-run/actions/runs/37218005413).
+Local desktop tests pass 139/6 ignored and headless tests pass 134/6 ignored;
+both crates pass Clippy with warnings and cognitive complexity denied.
+Three regressions failed before the fix: queued video cancellation, one-shot
+video descendants writing late output, and resident video descendants writing
+late output while retaining a canceled session. Image and video now share
+cancellation ownership, Unix generation processes own a killable process group,
+and interrupted resident sessions are discarded. A late-result regression
+also verifies that cancellation removes delivery URLs/data while preserving
+owner and lease identity. These tests use fake local CLIs, not GPU inference.
+
+The rebuilt image passed help, private bootstrap, ineffective-permission
+rejection, and expected rejection of unenrolled startup/health. These are
+CPU/container checks, not a new GPU run. The previous release image
+`sha256:12d482ce8c9f50a46b60a13eb832dfba2c525aafa4b1c1d8686f46b427faa2db`
+contains the earlier image-only cancellation behavior and remains historical.
 
 The independent live A40 inference and provider restart receipts used earlier
 image digests. The Animatic `reports/roadmap-qualification/headless-container.json`

@@ -33,7 +33,7 @@ use crate::protocol::{
 };
 use crate::work_gate::DeviceWorkGate;
 
-type ActiveImageJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
+type ActiveGenerationJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type ActiveGraphJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type ActiveChatJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type ActiveModelPlans = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
@@ -577,7 +577,7 @@ async fn connect_and_serve<R: NodeEvents>(
         }
     });
 
-    let active_images = ActiveImageJobs::default();
+    let active_generations = ActiveGenerationJobs::default();
     let active_graphs = ActiveGraphJobs::default();
     let active_chats = ActiveChatJobs::default();
     let active_model_plans = ActiveModelPlans::default();
@@ -638,7 +638,7 @@ async fn connect_and_serve<R: NodeEvents>(
                                 ServerMessageContext {
                                     app,
                                     out_tx: &out_tx,
-                                    active_images: &active_images,
+                                    active_generations: &active_generations,
                                     active_graphs: &active_graphs,
                                     active_chats: &active_chats,
                                     active_model_plans: &active_model_plans,
@@ -669,7 +669,7 @@ async fn connect_and_serve<R: NodeEvents>(
                         }
                         let task_app = app.clone();
                         let task_out = out_tx.clone();
-                        let task_images = active_images.clone();
+                        let task_generations = active_generations.clone();
                         let task_graphs = active_graphs.clone();
                         let task_chats = active_chats.clone();
                         let task_plans = active_model_plans.clone();
@@ -683,7 +683,7 @@ async fn connect_and_serve<R: NodeEvents>(
                                 ServerMessageContext {
                                     app: &task_app,
                                     out_tx: &task_out,
-                                    active_images: &task_images,
+                                    active_generations: &task_generations,
                                     active_graphs: &task_graphs,
                                     active_chats: &task_chats,
                                     active_model_plans: &task_plans,
@@ -710,7 +710,7 @@ async fn connect_and_serve<R: NodeEvents>(
     };
 
     cancel_active_requests(&[
-        &active_images,
+        &active_generations,
         &active_graphs,
         &active_chats,
         &active_model_plans,
@@ -849,7 +849,7 @@ fn message_type(text: &str) -> Option<String> {
 struct ServerMessageContext<'a, R: NodeEvents> {
     app: &'a R,
     out_tx: &'a mpsc::UnboundedSender<Message>,
-    active_images: &'a ActiveImageJobs,
+    active_generations: &'a ActiveGenerationJobs,
     active_graphs: &'a ActiveGraphJobs,
     active_chats: &'a ActiveChatJobs,
     active_model_plans: &'a ActiveModelPlans,
@@ -863,7 +863,7 @@ struct ServerMessageContext<'a, R: NodeEvents> {
 struct GenerationJobContext<'a, R: NodeEvents> {
     app: &'a R,
     out_tx: &'a mpsc::UnboundedSender<Message>,
-    active_images: &'a ActiveImageJobs,
+    active_generations: &'a ActiveGenerationJobs,
     work_gate: &'a DeviceWorkGate,
 }
 
@@ -884,7 +884,7 @@ async fn execute_generation_job<R: NodeEvents>(
     let GenerationJobContext {
         app,
         out_tx,
-        active_images,
+        active_generations,
         work_gate,
     } = context;
     let GenerationAssignment {
@@ -896,19 +896,19 @@ async fn execute_generation_job<R: NodeEvents>(
         direct_image,
         request,
     } = assignment;
-    let image_job = request.kind == JobKind::Image;
+    let cancellable_job = matches!(request.kind, JobKind::Image | JobKind::Video);
     let (cancel_tx, mut cancel_rx) = watch::channel(false);
-    if image_job {
-        let mut active = active_images.lock().await;
+    if cancellable_job {
+        let mut active = active_generations.lock().await;
         if active.contains_key(&job_id) {
             return Ok(());
         }
         active.insert(job_id.clone(), cancel_tx);
     }
-    // Register before acquiring the device slot so queued images can also cancel.
+    // Register before acquiring the device slot so queued image and video jobs can also cancel.
     let work_permit = tokio::select! {
         biased;
-        _ = wait_image_cancellation(&mut cancel_rx), if image_job => None,
+        _ = wait_generation_cancellation(&mut cancel_rx), if cancellable_job => None,
         permit = work_gate.acquire("relay", &job_id) => Some(permit),
     };
     let kind = job_kind_label(&request.kind);
@@ -961,11 +961,11 @@ async fn execute_generation_job<R: NodeEvents>(
     let started = Instant::now();
     let job_outcome = if work_permit.is_none() {
         drop(progress_tx);
-        Err(anyhow!("image generation cancelled"))
-    } else if image_job {
+        Err(anyhow!("{kind} generation cancelled"))
+    } else if cancellable_job {
         tokio::select! {
             biased;
-            _ = wait_image_cancellation(&mut cancel_rx) => Err(anyhow!("image generation cancelled")),
+            _ = wait_generation_cancellation(&mut cancel_rx) => Err(anyhow!("{kind} generation cancelled")),
             result = run_job(&request, &job_id, progress_tx) => result,
         }
     } else {
@@ -1007,32 +1007,16 @@ async fn execute_generation_job<R: NodeEvents>(
         },
     };
 
+    // Fence late cancellation against publication: remove under the same lock
+    // used by Cancel, then read the final watch value with no intervening await.
+    if cancellable_job {
+        active_generations.lock().await.remove(&job_id);
+    }
+    let canceled = cancellable_job && *cancel_rx.borrow();
     let mut result_msg = result_msg;
-    if image_job && *cancel_rx.borrow() {
-        if let AgentMessage::Result {
-            success,
-            image_url,
-            image_data,
-            media_url,
-            media_data,
-            error,
-            ..
-        } = &mut result_msg
-        {
-            *success = false;
-            *image_url = None;
-            *image_data = None;
-            *media_url = None;
-            *media_data = None;
-            *error = Some("image generation cancelled".to_string());
-        }
-    }
-    let canceled = image_job && *cancel_rx.borrow();
-    // Release the permit and active entry before the relay can reassign this job.
+    suppress_canceled_generation_output(&mut result_msg, kind, canceled);
+    // Release capacity before the relay can reassign this job.
     drop(work_permit);
-    if image_job {
-        active_images.lock().await.remove(&job_id);
-    }
     let ok = matches!(&result_msg, AgentMessage::Result { success, .. } if *success);
     out_tx.send(Message::Text(serde_json::to_string(&result_msg)?.into()))?;
     emit(
@@ -1045,6 +1029,29 @@ async fn execute_generation_job<R: NodeEvents>(
     Ok(())
 }
 
+fn suppress_canceled_generation_output(message: &mut AgentMessage, kind: &str, canceled: bool) {
+    if !canceled {
+        return;
+    }
+    if let AgentMessage::Result {
+        success,
+        image_url,
+        image_data,
+        media_url,
+        media_data,
+        error,
+        ..
+    } = message
+    {
+        *success = false;
+        *image_url = None;
+        *image_data = None;
+        *media_url = None;
+        *media_data = None;
+        *error = Some(format!("{kind} generation cancelled"));
+    }
+}
+
 async fn handle_server_message<R: NodeEvents>(
     context: ServerMessageContext<'_, R>,
     txt: &str,
@@ -1052,7 +1059,7 @@ async fn handle_server_message<R: NodeEvents>(
     let ServerMessageContext {
         app,
         out_tx,
-        active_images,
+        active_generations,
         active_graphs,
         active_chats,
         active_model_plans,
@@ -1105,7 +1112,7 @@ async fn handle_server_message<R: NodeEvents>(
                 GenerationJobContext {
                     app,
                     out_tx,
-                    active_images,
+                    active_generations,
                     work_gate,
                 },
                 GenerationAssignment {
@@ -1358,7 +1365,7 @@ async fn handle_server_message<R: NodeEvents>(
             });
         }
         ServerMessage::Cancel { job_id } => {
-            if let Some(cancel) = active_images.lock().await.get(&job_id) {
+            if let Some(cancel) = active_generations.lock().await.get(&job_id) {
                 let _ = cancel.send(true);
             }
             emit(
@@ -1590,7 +1597,7 @@ async fn build_success(
     }
 }
 
-async fn wait_image_cancellation(cancel: &mut watch::Receiver<bool>) {
+async fn wait_generation_cancellation(cancel: &mut watch::Receiver<bool>) {
     if *cancel.borrow() {
         return;
     }
@@ -2100,10 +2107,19 @@ mod tests {
 
     #[tokio::test]
     async fn image_cancel_disconnect_and_duplicates_preserve_queued_job_ownership() {
+        assert_queued_generation_cancellation("image").await;
+    }
+
+    #[tokio::test]
+    async fn video_cancel_disconnect_and_duplicates_preserve_queued_job_ownership() {
+        assert_queued_generation_cancellation("video").await;
+    }
+
+    async fn assert_queued_generation_cancellation(kind: &str) {
         for disconnected in [false, true] {
             let app = crate::event_sink::NoopEvents;
             let (out, mut messages) = mpsc::unbounded_channel();
-            let images = ActiveImageJobs::default();
+            let images = ActiveGenerationJobs::default();
             let other = ActiveGraphJobs::default();
             let gate = DeviceWorkGate::default();
             let held = gate.acquire("test", "other-work").await;
@@ -2111,7 +2127,7 @@ mod tests {
             let context = || ServerMessageContext {
                 app: &app,
                 out_tx: &out,
-                active_images: &images,
+                active_generations: &images,
                 active_graphs: &other,
                 active_chats: &other,
                 active_model_plans: &other,
@@ -2123,7 +2139,7 @@ mod tests {
             };
             let request = serde_json::json!({
                 "type": "job", "job_id": "queued-image", "lease_id": "image-lease", "owner_user_id": "owner",
-                "upload_url": "http://unused.invalid", "request": { "kind": "image", "prompt": "unused", "width": 64, "height": 64 }
+                "upload_url": "http://unused.invalid", "request": { "kind": kind, "prompt": "unused", "width": 64, "height": 64 }
             }).to_string();
             let operation = async {
                 let (job, _) = tokio::join!(handle_server_message(context(), &request), async {
@@ -2148,7 +2164,7 @@ mod tests {
             };
             tokio::time::timeout(Duration::from_secs(2), operation)
                 .await
-                .expect("queued image ignored cancellation");
+                .expect("queued generation ignored cancellation");
             assert!(images.lock().await.is_empty());
             assert_eq!(gate.current().work_id, "other-work");
             let mut results = Vec::new();
@@ -2169,8 +2185,41 @@ mod tests {
             assert_eq!(results.len(), 1);
             assert_eq!(results[0]["owner_user_id"], "owner");
             assert_eq!(results[0]["success"], false);
-            assert_eq!(results[0]["error"], "image generation cancelled");
+            assert_eq!(results[0]["error"], format!("{kind} generation cancelled"));
             drop(held);
+        }
+    }
+
+    #[test]
+    fn late_video_cancellation_suppresses_all_delivery_channels_preserving_lease() {
+        let mut result = AgentMessage::Result {
+            job_id: "video-job".into(),
+            lease_id: Some("video-lease".into()),
+            owner_user_id: Some("owner".into()),
+            success: true,
+            image_url: Some("https://example.test/preview".into()),
+            image_data: Some("preview".into()),
+            media_url: Some("https://example.test/late.mp4".into()),
+            media_data: Some("late".into()),
+            content_type: Some("video/mp4".into()),
+            output_kind: Some("video".into()),
+            seed: Some(42),
+            generation_time_ms: Some(10),
+            error: None,
+        };
+        suppress_canceled_generation_output(&mut result, "video", false);
+        assert!(serde_json::to_value(&result).unwrap()["success"]
+            .as_bool()
+            .unwrap());
+        suppress_canceled_generation_output(&mut result, "video", true);
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["success"], false);
+        assert_eq!(value["error"], "video generation cancelled");
+        assert_eq!(value["job_id"], "video-job");
+        assert_eq!(value["lease_id"], "video-lease");
+        assert_eq!(value["owner_user_id"], "owner");
+        for field in ["image_url", "image_data", "media_url", "media_data"] {
+            assert!(value[field].is_null(), "canceled result retained {field}");
         }
     }
 
