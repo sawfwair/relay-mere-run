@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "image": "registry.cloudflare.com/d49787aa3908b52ac1bf58ba6d6375f1/animatic-headless-node@sha256:12d482ce8c9f50a46b60a13eb832dfba2c525aafa4b1c1d8686f46b427faa2db",
+  "image": "registry.cloudflare.com/d49787aa3908b52ac1bf58ba6d6375f1/animatic-headless-node@sha256:458e435c539cec768361fab6c8f4707e4ced46eb45648aaf67086ef8b26da440",
   "platform": "linux/amd64",
-  "runtimeSourceCommit": "125a6e250308fd6375c4d33ae2cbd35d6c9ef2e2",
-  "daemonSha256": "fd94712054391ee0bb7819959e0d0d614ffa0f3ea702d34088186f855fd2183d",
+  "runtimeSourceCommit": "4c3c3245875df1ec106b1f4e84ff30c50d201965",
+  "daemonSha256": "778f0e3bce25c884405b3161def6a8063ce92d5e48d410e41df5b2e9268317d7",
   "runtimeVersion": "0.60.1",
   "runtimeArchiveSha256": "c465064323a63ddb06b6455f506f55bb6c7b629839105d329b362621807623f6",
-  "publishedAt": "2026-10-04T15:58:02.581277+00:00",
-  "sourceCiRun": "https://github.com/sawfwair/relay-mere-run/actions/runs/37214097733",
-  "qualificationBoundary": "Current image: Linux cross-build and CPU bootstrap/permission/unenrolled-health checks passed. Native suites130 headless/135 desktop pass with6 live tests ignored each. Prior A40 inference and provider restart receipts use predecessor image digests; no account-approved GPU/Relay/Animatic inference has been run with this release image."
+  "publishedAt": "2026-10-04T16:47:31.350392+00:00",
+  "sourceCiRun": "https://github.com/sawfwair/relay-mere-run/actions/runs/37218005413",
+  "qualificationBoundary": "Current image: Linux cross-build and CPU bootstrap/permission/unenrolled-health checks passed. Native suites134 headless/139 desktop pass with6 live tests ignored each. Image and video cancellation now terminate generation process groups and discard interrupted resident sessions; fake CLI tests prove the process boundary, not real GPU video inference. Prior A40 inference and provider restart receipts use predecessor image digests; no account-approved GPU/Relay/Animatic inference has been run with this release image."
 }
