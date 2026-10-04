@@ -32,6 +32,52 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise QualificationError('Redirect rejected; account bearer stays on Relay origin')
 
 
+def make_api(token, opener=None, token_provider=None):
+    opener = opener or urllib.request.build_opener(NoRedirect())
+    def api(method, path, body=None):
+        request = urllib.request.Request('https://relay.mere.run/api' + path,
+            data=None if body is None else json.dumps(body).encode(), method=method,
+            headers={'Authorization': 'Bearer ' + (token_provider() if token_provider else token), 'Content-Type': 'application/json',
+                     'User-Agent': 'animatic-node-qualification/1.0'})
+        with opener.open(request, timeout=30) as response:
+            return json.load(response)
+    return api
+
+
+def provider_access_token(command, owner, runner=subprocess.run, now=time.time):
+    try:
+        response = runner(command, check=True, timeout=40, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if len(response.stdout) > 32 * 1024:
+            raise ValueError('oversized provider response')
+        value = json.loads(response.stdout)
+        token = value['access_token']
+        if not isinstance(token, str):
+            raise ValueError('invalid token type')
+        payload = token.split('.')[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
+        if (not isinstance(claims, dict) or set(value) != {'access_token'} or claims.get('sub') != owner or
+                claims.get('client_id') != 'animatic-cli' or claims.get('exp', 0) <= now() + 60):
+            raise ValueError('wrong owner, session, or expired provider token')
+        return token
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, IndexError, TypeError):
+        # Never expose provider stdout/stderr: either can contain credentials.
+        raise QualificationError('Independent Animatic access-token provider failed validation') from None
+
+
+def parse_token_provider(value):
+    if value is None:
+        return None
+    try:
+        command = json.loads(value)
+        if (not isinstance(command, list) or not command or
+                not all(isinstance(arg, str) and arg and '\0' not in arg for arg in command) or
+                not pathlib.Path(command[0]).is_absolute()):
+            raise ValueError('expected absolute executable and arguments')
+        return command
+    except (ValueError, TypeError):
+        raise QualificationError('Token provider must be a JSON argument array with an absolute executable') from None
+
+
 def png_metadata(data):
     if len(data) < 33 or data[:8] != b'\x89PNG\r\n\x1a\n' or data[12:16] != b'IHDR':
         raise QualificationError('Expected a PNG artifact')
@@ -203,6 +249,7 @@ def run(api, device_id, expected_name, owner_id, output, receipt, save,
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--auth-file', required=True)
+    parser.add_argument('--access-token-provider', help='JSON argv for a private independent Animatic-session provider; never a shell string')
     parser.add_argument('--device-id', required=True)
     parser.add_argument('--expected-node-name', required=True)
     parser.add_argument('--receipt-dir', required=True)
@@ -233,13 +280,10 @@ def main():
     def save():
         (output / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
     opener = urllib.request.build_opener(NoRedirect())
-    def api(method, path, body=None):
-        request = urllib.request.Request('https://relay.mere.run/api' + path,
-            data=None if body is None else json.dumps(body).encode(), method=method,
-            headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json',
-                     'User-Agent': 'animatic-node-qualification/1.0'})
-        with opener.open(request, timeout=30) as response:
-            return json.load(response)
+    provider_command = parse_token_provider(args.access_token_provider)
+    token_provider = (lambda: provider_access_token(provider_command, claims['sub'])) if provider_command else None
+    receipt['accessCredentialMode'] = 'independent-animatic-provider' if token_provider else 'initial-node-access-only'
+    api = make_api(token, opener, token_provider)
     try:
         run(api, args.device_id, args.expected_node_name, claims['sub'], output, receipt, save,
             revoke=args.revoke_owned_node)

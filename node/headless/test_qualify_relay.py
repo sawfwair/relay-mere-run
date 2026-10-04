@@ -1,9 +1,14 @@
 import base64
 import copy
 import importlib.util
+import io
+import json
+import urllib.error
 import pathlib
 import struct
 import tempfile
+import subprocess
+from types import SimpleNamespace
 import unittest
 
 spec = importlib.util.spec_from_file_location('relay_qualifier', pathlib.Path(__file__).with_name('qualify-relay.py'))
@@ -81,6 +86,76 @@ class RelayQualificationTests(unittest.TestCase):
         self.assertTrue(receipt['fleetNodeRevokedAndDisconnected'])
         self.assertFalse(receipt['cleanupErrors'])
         self.assertEqual(sum(path == '/generate' for _, path, _ in relay.calls), 2)
+
+    def test_access_refresh_after_model_install_and_during_cleanup(self):
+        relay = Relay()
+        relay.node['runtime']['installed_models'] = []
+        current = ['initial-access']
+        provider_calls = []
+        class Opener:
+            def open(self, request, timeout):
+                if request.get_header('Authorization') != 'Bearer ' + current[0]:
+                    raise urllib.error.HTTPError(request.full_url, 401, 'expired', {}, None)
+                method = request.get_method()
+                path = request.full_url.removeprefix('https://relay.mere.run/api')
+                body = json.loads(request.data) if request.data else None
+                if path == '/fleet/model-plans':
+                    value = {'plan_id': 'install'}
+                elif path.endswith('/apply'):
+                    current[0] = 'refreshed-after-install'
+                    value = {}
+                elif path == '/fleet/model-plans/install':
+                    value = {'state': 'finished'}
+                else:
+                    value = relay(method, path, body)
+                    if path == '/fleet/nodes/owned':
+                        current[0] = 'refreshed-for-cleanup'
+                return io.BytesIO(json.dumps(value).encode())
+        def provider():
+            provider_calls.append(current[0])
+            return current[0]
+        api = qualifier.make_api('initial-access', Opener(), provider)
+        receipt = self.exercise(api, revoke=True)
+        self.assertEqual(receipt['status'], 'passed')
+        self.assertFalse(receipt['cleanupErrors'])
+        self.assertIn('refreshed-after-install', provider_calls)
+        self.assertIn('refreshed-for-cleanup', provider_calls)
+        self.assertEqual(sum(path == '/generate' for _, path, _ in relay.calls), 2)
+        self.assertIn(('DELETE', '/job/job-1/image', None), relay.calls)
+        self.assertIn(('DELETE', '/job/job-2/image', None), relay.calls)
+
+    def test_provider_rejects_wrong_owner_node_refresh_identity_and_expired_access(self):
+        def runner_for(claims):
+            token = 'fixture.' + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip('=') + '.signature'
+            return lambda *_, **__: SimpleNamespace(stdout=json.dumps({'access_token': token}).encode())
+        valid = {'sub': 'owner', 'client_id': 'animatic-cli', 'exp': 2000}
+        self.assertTrue(qualifier.provider_access_token(['/absolute/provider'], 'owner', runner_for(valid), now=lambda: 1000))
+        for changes in [{'sub': 'other'}, {'client_id': 'mererun-node'}, {'exp': 1059}]:
+            with self.assertRaisesRegex(qualifier.QualificationError, 'failed validation'):
+                qualifier.provider_access_token(['/absolute/provider'], 'owner', runner_for({**valid, **changes}), now=lambda: 1000)
+        def failed(*_, **__):
+            raise subprocess.CalledProcessError(1, ['/provider'], output=b'private provider output', stderr=b'private provider error')
+        with self.assertRaises(qualifier.QualificationError) as error:
+            qualifier.provider_access_token(['/provider'], 'owner', failed)
+        self.assertNotIn('private provider', str(error.exception))
+
+    def test_token_provider_is_direct_argv_not_a_shell_command(self):
+        self.assertEqual(qualifier.parse_token_provider('["/usr/bin/node", "provider.mjs"]'), ['/usr/bin/node', 'provider.mjs'])
+        for value in ['"node provider.mjs"', '["node", "provider.mjs"]', '[]', '[42]']:
+            with self.assertRaises(qualifier.QualificationError):
+                qualifier.parse_token_provider(value)
+
+    def test_auth_failure_does_not_replay_mutation(self):
+        calls = []
+        class Opener:
+            def open(self, request, timeout):
+                calls.append(request.get_method())
+                raise urllib.error.HTTPError(request.full_url, 401, 'expired', {}, None)
+        api = qualifier.make_api('old', Opener(), lambda: 'fresh')
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            api('POST', '/generate', {})
+        error.exception.close()
+        self.assertEqual(calls, ['POST'])
 
     def test_old_relay_cannot_silently_fall_back(self):
         relay = Relay()

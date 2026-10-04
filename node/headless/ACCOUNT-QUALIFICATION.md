@@ -56,6 +56,25 @@ The optional check refuses the original local token once the remote daemon may
 have reached its refresh window; revoking a stale replaced token would not prove
 that the current remote credential was revoked.
 
+The Animatic account hook supplies `--access-token-provider` as a JSON argument
+array invoking its own `--relay-access-token` mode. Before every Relay API call,
+including model installation polling and final cleanup, the qualifier obtains
+a fresh access token from that independent Animatic CLI session. Provider output
+stays on a captured pipe, must match the original owner, identify `animatic-cli`,
+and retain at least 60 seconds of access lifetime. Provider errors do not echo
+stdout/stderr. No API mutation is automatically retried on an auth or network
+failure. This provider never reads or rotates the remote Node refresh token.
+Without a provider, the standalone qualifier retains its initial Node access
+JWT and is bounded by that JWT's lifetime.
+
+On interruption the parent hook terminates the owned qualifier process group,
+including any token-provider descendant, before resolving credentials for
+cleanup. It reads the child's durable receipt and reconciles known Relay job
+and model-plan IDs before fleet revocation and logout. Cleanup refuses another
+owner's job, another Node's job, or a model plan shared with another Node.
+An indeterminate submission without a saved ID remains an explicit reconciliation
+error, never authorization to submit replacement work.
+
 ## Animatic hook contract
 
 Pass `--account-hook /absolute/executable` to run the full application chain
