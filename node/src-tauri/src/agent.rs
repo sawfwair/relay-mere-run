@@ -860,6 +860,191 @@ struct ServerMessageContext<'a, R: NodeEvents> {
     live_asr: &'a LiveAsrSessions,
 }
 
+struct GenerationJobContext<'a, R: NodeEvents> {
+    app: &'a R,
+    out_tx: &'a mpsc::UnboundedSender<Message>,
+    active_images: &'a ActiveImageJobs,
+    work_gate: &'a DeviceWorkGate,
+}
+
+struct GenerationAssignment {
+    job_id: String,
+    lease_id: Option<String>,
+    client_id: String,
+    owner_user_id: String,
+    upload_url: String,
+    direct_image: bool,
+    request: Box<JobRequest>,
+}
+
+async fn execute_generation_job<R: NodeEvents>(
+    context: GenerationJobContext<'_, R>,
+    assignment: GenerationAssignment,
+) -> Result<()> {
+    let GenerationJobContext {
+        app,
+        out_tx,
+        active_images,
+        work_gate,
+    } = context;
+    let GenerationAssignment {
+        job_id,
+        lease_id,
+        client_id,
+        owner_user_id,
+        upload_url,
+        direct_image,
+        request,
+    } = assignment;
+    let image_job = request.kind == JobKind::Image;
+    let (cancel_tx, mut cancel_rx) = watch::channel(false);
+    if image_job {
+        let mut active = active_images.lock().await;
+        if active.contains_key(&job_id) {
+            return Ok(());
+        }
+        active.insert(job_id.clone(), cancel_tx);
+    }
+    // Register before acquiring the device slot so queued images can also cancel.
+    let work_permit = tokio::select! {
+        biased;
+        _ = wait_image_cancellation(&mut cancel_rx), if image_job => None,
+        permit = work_gate.acquire("relay", &job_id) => Some(permit),
+    };
+    let kind = job_kind_label(&request.kind);
+    emit(
+        app,
+        "node:job",
+        serde_json::json!({
+            "job_id": job_id, "kind": kind, "state": "started",
+            "client_id": client_id, "prompt": request.prompt, "model": request.model,
+        }),
+    );
+
+    // Signal in-progress immediately; per-step updates follow while
+    // the model loads and denoises.
+    let _ = out_tx.send(Message::Text(
+        serde_json::to_string(&AgentMessage::Progress {
+            job_id: job_id.clone(),
+            lease_id: lease_id.clone(),
+            step: 0,
+            total_steps: request.steps.max(1),
+            preview_base64: None,
+        })?
+        .into(),
+    ));
+
+    // Forward per-step progress from the generation process to the
+    // relay as it happens.
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<mererun::JobProgressUpdate>();
+    let forward_out = out_tx.clone();
+    let forward_job_id = job_id.clone();
+    let forward_lease_id = lease_id.clone();
+    let progress_forwarder = tokio::spawn(async move {
+        while let Some(update) = progress_rx.recv().await {
+            let message = AgentMessage::Progress {
+                job_id: forward_job_id.clone(),
+                lease_id: forward_lease_id.clone(),
+                step: update.step,
+                total_steps: update.total_steps,
+                preview_base64: None,
+            };
+            let Ok(txt) = serde_json::to_string(&message) else {
+                break;
+            };
+            if forward_out.send(Message::Text(txt.into())).is_err() {
+                break;
+            }
+        }
+    });
+
+    let started = Instant::now();
+    let job_outcome = if work_permit.is_none() {
+        drop(progress_tx);
+        Err(anyhow!("image generation cancelled"))
+    } else if image_job {
+        tokio::select! {
+            biased;
+            _ = wait_image_cancellation(&mut cancel_rx) => Err(anyhow!("image generation cancelled")),
+            result = run_job(&request, &job_id, progress_tx) => result,
+        }
+    } else {
+        run_job(&request, &job_id, progress_tx).await
+    };
+    // run_job dropped its sender; wait for queued progress to flush so
+    // the relay never sees progress after the result.
+    let _ = progress_forwarder.await;
+    let result_msg = match job_outcome {
+        Ok(output) => {
+            build_success(
+                JobResultContext {
+                    job_id: &job_id,
+                    lease_id: lease_id.as_deref(),
+                    owner_user_id: &owner_user_id,
+                    upload_url: &upload_url,
+                    direct_image,
+                    seed: request.seed,
+                    started,
+                },
+                output,
+            )
+            .await
+        }
+        Err(e) => AgentMessage::Result {
+            job_id: job_id.clone(),
+            lease_id: lease_id.clone(),
+            owner_user_id: Some(owner_user_id.clone()),
+            success: false,
+            image_url: None,
+            image_data: None,
+            media_url: None,
+            media_data: None,
+            content_type: None,
+            output_kind: Some(kind.to_string()),
+            seed: None,
+            generation_time_ms: None,
+            error: Some(e.to_string()),
+        },
+    };
+
+    let mut result_msg = result_msg;
+    if image_job && *cancel_rx.borrow() {
+        if let AgentMessage::Result {
+            success,
+            image_url,
+            image_data,
+            media_url,
+            media_data,
+            error,
+            ..
+        } = &mut result_msg
+        {
+            *success = false;
+            *image_url = None;
+            *image_data = None;
+            *media_url = None;
+            *media_data = None;
+            *error = Some("image generation cancelled".to_string());
+        }
+    }
+    let canceled = image_job && *cancel_rx.borrow();
+    // Release the permit and active entry before the relay can reassign this job.
+    drop(work_permit);
+    if image_job {
+        active_images.lock().await.remove(&job_id);
+    }
+    let ok = matches!(&result_msg, AgentMessage::Result { success, .. } if *success);
+    out_tx.send(Message::Text(serde_json::to_string(&result_msg)?.into()))?;
+    emit(
+        app,
+        "node:job",
+        serde_json::json!({
+            "job_id": job_id, "kind": kind, "state": if canceled { "canceled" } else if ok { "done" } else { "failed" },
+        }),
+    );
+    Ok(())
+}
+
 async fn handle_server_message<R: NodeEvents>(
     context: ServerMessageContext<'_, R>,
     txt: &str,
@@ -916,153 +1101,24 @@ async fn handle_server_message<R: NodeEvents>(
             direct_image,
             request,
         } => {
-            let image_job = request.kind == JobKind::Image;
-            let (cancel_tx, mut cancel_rx) = watch::channel(false);
-            if image_job {
-                let mut active = active_images.lock().await;
-                if active.contains_key(&job_id) {
-                    return Ok(());
-                }
-                active.insert(job_id.clone(), cancel_tx);
-            }
-            // Register before acquiring the device slot so queued images can also cancel.
-            let work_permit = tokio::select! {
-                biased;
-                _ = wait_image_cancellation(&mut cancel_rx), if image_job => None,
-                permit = work_gate.acquire("relay", &job_id) => Some(permit),
-            };
-            let kind = job_kind_label(&request.kind);
-            emit(
-                app,
-                "node:job",
-                serde_json::json!({
-                    "job_id": job_id, "kind": kind, "state": "started",
-                    "client_id": client_id, "prompt": request.prompt, "model": request.model,
-                }),
-            );
-
-            // Signal in-progress immediately; per-step updates follow while
-            // the model loads and denoises.
-            let _ = out_tx.send(Message::Text(
-                serde_json::to_string(&AgentMessage::Progress {
-                    job_id: job_id.clone(),
-                    lease_id: lease_id.clone(),
-                    step: 0,
-                    total_steps: request.steps.max(1),
-                    preview_base64: None,
-                })?
-                .into(),
-            ));
-
-            // Forward per-step progress from the generation process to the
-            // relay as it happens.
-            let (progress_tx, mut progress_rx) =
-                mpsc::unbounded_channel::<mererun::JobProgressUpdate>();
-            let forward_out = out_tx.clone();
-            let forward_job_id = job_id.clone();
-            let forward_lease_id = lease_id.clone();
-            let progress_forwarder = tokio::spawn(async move {
-                while let Some(update) = progress_rx.recv().await {
-                    let message = AgentMessage::Progress {
-                        job_id: forward_job_id.clone(),
-                        lease_id: forward_lease_id.clone(),
-                        step: update.step,
-                        total_steps: update.total_steps,
-                        preview_base64: None,
-                    };
-                    let Ok(txt) = serde_json::to_string(&message) else {
-                        break;
-                    };
-                    if forward_out.send(Message::Text(txt.into())).is_err() {
-                        break;
-                    }
-                }
-            });
-
-            let started = Instant::now();
-            let job_outcome = if work_permit.is_none() {
-                drop(progress_tx);
-                Err(anyhow!("image generation cancelled"))
-            } else if image_job {
-                tokio::select! {
-                    biased;
-                    _ = wait_image_cancellation(&mut cancel_rx) => Err(anyhow!("image generation cancelled")),
-                    result = run_job(&request, &job_id, progress_tx) => result,
-                }
-            } else {
-                run_job(&request, &job_id, progress_tx).await
-            };
-            // run_job dropped its sender; wait for queued progress to flush so
-            // the relay never sees progress after the result.
-            let _ = progress_forwarder.await;
-            let result_msg = match job_outcome {
-                Ok(output) => {
-                    build_success(
-                        JobResultContext {
-                            job_id: &job_id,
-                            lease_id: lease_id.as_deref(),
-                            owner_user_id: &owner_user_id,
-                            upload_url: &upload_url,
-                            direct_image,
-                            seed: request.seed,
-                            started,
-                        },
-                        output,
-                    )
-                    .await
-                }
-                Err(e) => AgentMessage::Result {
-                    job_id: job_id.clone(),
-                    lease_id: lease_id.clone(),
-                    owner_user_id: Some(owner_user_id.clone()),
-                    success: false,
-                    image_url: None,
-                    image_data: None,
-                    media_url: None,
-                    media_data: None,
-                    content_type: None,
-                    output_kind: Some(kind.to_string()),
-                    seed: None,
-                    generation_time_ms: None,
-                    error: Some(e.to_string()),
+            execute_generation_job(
+                GenerationJobContext {
+                    app,
+                    out_tx,
+                    active_images,
+                    work_gate,
                 },
-            };
-
-            let mut result_msg = result_msg;
-            if image_job && *cancel_rx.borrow() {
-                if let AgentMessage::Result {
-                    success,
-                    image_url,
-                    image_data,
-                    media_url,
-                    media_data,
-                    error,
-                    ..
-                } = &mut result_msg
-                {
-                    *success = false;
-                    *image_url = None;
-                    *image_data = None;
-                    *media_url = None;
-                    *media_data = None;
-                    *error = Some("image generation cancelled".to_string());
-                }
-            }
-            let canceled = image_job && *cancel_rx.borrow();
-            // Release the permit and active entry before the relay can reassign this job.
-            drop(work_permit);
-            if image_job {
-                active_images.lock().await.remove(&job_id);
-            }
-            let ok = matches!(&result_msg, AgentMessage::Result { success, .. } if *success);
-            out_tx.send(Message::Text(serde_json::to_string(&result_msg)?.into()))?;
-            emit(
-                app,
-                "node:job",
-                serde_json::json!({
-                    "job_id": job_id, "kind": kind, "state": if canceled { "canceled" } else if ok { "done" } else { "failed" },
-                }),
-            );
+                GenerationAssignment {
+                    job_id,
+                    lease_id,
+                    client_id,
+                    owner_user_id,
+                    upload_url,
+                    direct_image,
+                    request,
+                },
+            )
+            .await?;
         }
         chat_message @ (ServerMessage::ChatRequest { .. } | ServerMessage::ChatCancel { .. }) => {
             handle_chat_server_message(app, out_tx, active_chats, work_gate, chat_message).await?;
@@ -2043,7 +2099,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn image_cancel_and_disconnect_release_queued_requests_without_starting_generation() {
+    async fn image_cancel_disconnect_and_duplicates_preserve_queued_job_ownership() {
         for disconnected in [false, true] {
             let app = crate::event_sink::NoopEvents;
             let (out, mut messages) = mpsc::unbounded_channel();
@@ -2066,7 +2122,7 @@ mod tests {
                 live_asr: &live,
             };
             let request = serde_json::json!({
-                "type": "job", "job_id": "queued-image", "owner_user_id": "owner",
+                "type": "job", "job_id": "queued-image", "lease_id": "image-lease", "owner_user_id": "owner",
                 "upload_url": "http://unused.invalid", "request": { "kind": "image", "prompt": "unused", "width": 64, "height": 64 }
             }).to_string();
             let operation = async {
@@ -2074,6 +2130,9 @@ mod tests {
                     while !images.lock().await.contains_key("queued-image") {
                         tokio::task::yield_now().await;
                     }
+                    // Repeated delivery must not replace the original cancellation sender
+                    // or emit a second progress/result sequence while the slot is held.
+                    handle_server_message(context(), &request).await.unwrap();
                     if disconnected {
                         cancel_active_requests(&[&images]).await;
                     } else {
@@ -2093,14 +2152,22 @@ mod tests {
             assert!(images.lock().await.is_empty());
             assert_eq!(gate.current().work_id, "other-work");
             let mut results = Vec::new();
+            let mut progress_count = 0;
             while let Ok(message) = messages.try_recv() {
                 let payload: serde_json::Value =
                     serde_json::from_str(message.to_text().unwrap()).unwrap();
-                if payload["type"] == "result" {
+                assert_eq!(payload["lease_id"], "image-lease");
+                if payload["type"] == "progress" {
+                    assert!(results.is_empty(), "progress arrived after result");
+                    assert_eq!(payload["step"], 0);
+                    progress_count += 1;
+                } else if payload["type"] == "result" {
                     results.push(payload);
                 }
             }
+            assert_eq!(progress_count, 1);
             assert_eq!(results.len(), 1);
+            assert_eq!(results[0]["owner_user_id"], "owner");
             assert_eq!(results[0]["success"], false);
             assert_eq!(results[0]["error"], "image generation cancelled");
             drop(held);
