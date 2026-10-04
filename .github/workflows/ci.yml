@@ -34,6 +34,8 @@ jobs:
           pnpm --dir node audit --prod --audit-level=moderate
       - name: Run canonical fast checks
         run: pnpm verify:fast
+      - name: Test headless qualification controllers without provider calls
+        run: python3 -m unittest discover -s node/headless -p 'test_qualify_*.py'
       - name: Enforce Worker coverage thresholds
         run: pnpm test:coverage
       - name: Upload coverage evidence
