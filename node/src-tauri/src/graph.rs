@@ -17,6 +17,7 @@ use crate::protocol::{
     GraphBundleFile, GraphExecutionMetrics, GraphRunArtifact, GraphWorkerCapabilities,
 };
 
+#[path = "graph/publication.rs"]
 mod publication;
 
 const ARTIFACT_CHUNK_SIZE: u64 = 8 * 1024 * 1024;

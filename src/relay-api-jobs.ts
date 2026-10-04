@@ -28,11 +28,20 @@ function inferJobKind(request: SubmitJobRequest): 'image' | 'music' | 'video' {
   return 'image';
 }
 
+function canUseRequiredDevice(ctx: RelayContext, deviceId: string | undefined, userId: string): boolean {
+  if (!deviceId) return true;
+  if (!userId || userId !== ctx.userId) return false;
+  return Array.from(ctx.getConnectedAgents().values()).some((agent) => agent.info.device_id === deviceId);
+}
+
 export async function handleSubmitJob(
   ctx: RelayContext,
   request: SubmitJobRequest & { client_id: string; relay_origin?: string },
   userId: string
 ): Promise<Response> {
+  if (!canUseRequiredDevice(ctx, request.required_device_id, userId)) {
+    return Response.json({ error: 'Selected node is not connected to your fleet', code: 'TARGET_NODE_UNAVAILABLE' }, { status: 403 });
+  }
   const jobId = `job_${crypto.randomUUID().slice(0, 12)}`;
   const origin = request.relay_origin || 'https://relay.mere.run';
   const uploadUrl = generateUploadUrl(origin, userId, jobId);
@@ -77,6 +86,7 @@ export async function handleSubmitJob(
 
   const job: Job = {
     job_id: jobId,
+    required_device_id: request.required_device_id,
     user_id: userId,
     client_id: request.client_id,
     agent_id: null,
@@ -132,6 +142,7 @@ export async function handleGetJob(ctx: RelayContext, jobId: string): Promise<Re
   }
 
   const response: JobStatusResponse = {
+    required_device_id: job.required_device_id,
     job_id: job.job_id,
     user_id: job.user_id,
     client_id: job.client_id,

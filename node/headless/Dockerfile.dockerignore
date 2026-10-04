@@ -1,0 +1,11 @@
+**
+!headless/
+!headless/Cargo.toml
+!headless/Cargo.lock
+!headless/src/
+!headless/src/**
+!src-tauri/
+!src-tauri/src/
+!src-tauri/src/**
+!headless/container-entrypoint.sh
+!headless/gpu-preflight.sh

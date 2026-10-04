@@ -27,6 +27,7 @@ export interface Env {
 
 // Agent capabilities reported on connect
 export interface AgentCapabilities {
+  hosting?: { kind: 'workstation' | 'runpod' | 'other' | 'unknown'; source: 'owner-declared'; label?: string };
   models: string[];
   max_resolution: number;
   controlnet: boolean;
@@ -356,6 +357,8 @@ export interface JobRequest {
 
 // Job tracked by relay
 export interface Job {
+  /** Hard placement constraint retained across queued/recovered attempts. */
+  required_device_id?: string;
   job_id: string;
   user_id: string;
   client_id: string;
@@ -973,6 +976,7 @@ export type RelayMessage =
 
 // HTTP API request/response types
 export interface SubmitJobRequest {
+  required_device_id?: string;
   kind?: 'image' | 'music' | 'video';
   prompt: string;
   negative_prompt?: string;
@@ -1011,8 +1015,10 @@ export type SubmitVideoRequest = SubmitJobRequest;
 export type SubmitMusicRequest = SubmitJobRequest;
 
 export interface StatusResponse {
+  placement_constraints?: string[];
   agents: Array<{
     agent_id: string;
+    device_id?: string;
     device_name: string;
     status: 'online' | 'busy' | 'offline';
     last_seen: string;
@@ -1031,6 +1037,7 @@ export interface SubmitJobResponse {
 }
 
 export interface JobStatusResponse {
+  required_device_id?: string;
   job_id: string;
   user_id: string;
   client_id: string;

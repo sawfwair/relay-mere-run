@@ -37,6 +37,7 @@ export async function handleStatus(ctx: RelayContext): Promise<Response> {
 
   const agents = Array.from(ctx.getConnectedAgents().values()).map((agent) => ({
     agent_id: agent.info.agent_id,
+    device_id: agent.info.device_id,
     device_name: agent.info.device_name,
     status: agent.info.status,
     last_seen: agent.info.last_ping,
@@ -46,7 +47,7 @@ export async function handleStatus(ctx: RelayContext): Promise<Response> {
 
   const response: StatusResponse = {
     agents,
-    queue_depth: countQueuedWork(ctx),
+    placement_constraints: ['required_device_id'],    queue_depth: countQueuedWork(ctx),
   };
   return Response.json(response);
 }

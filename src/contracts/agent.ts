@@ -70,6 +70,11 @@ const pluginCapabilitySchema = z.object({
 }).passthrough();
 
 export const agentCapabilitiesSchema = z.object({
+  hosting: z.object({
+    kind: z.enum(['workstation', 'runpod', 'other', 'unknown']),
+    source: z.literal('owner-declared'),
+    label: z.string().max(80).refine((label) => Array.from(label).every((character) => character.charCodeAt(0) > 31 && character.charCodeAt(0) !== 127)).optional(),
+  }).strict().optional(),
   models: z.array(z.string()),
   max_resolution: z.number(),
   controlnet: z.boolean(),
