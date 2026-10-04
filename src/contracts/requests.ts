@@ -23,6 +23,7 @@ const submitJobRequestObjectSchema = z.object({
   input_image_data: z.string().optional(),
   input_strength: z.number().optional(),
   reference_image_urls: z.array(z.string()).optional(),
+  required_device_id: z.string().trim().min(1).max(200).optional(),
   agent_id: z.string().optional(),
   webhook_url: z.string().optional(),
   direct_image: z.boolean().optional(),

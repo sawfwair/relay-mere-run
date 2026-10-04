@@ -72,6 +72,8 @@ function supportsRequestedModelOrMarker(
 }
 
 export function supportsJob(info: AgentInfo, job: Job): boolean {
+  if (job.required_device_id && info.device_id !== job.required_device_id) return false;
+  if (job.required_device_id && job.request.model?.trim() && !agentHasModel(info, job.request.model)) return false;
   const kind = inferJobKind(job);
   if (kind === 'music') {
     return supportsRequestedModelOrMarker(info, job.request.model, 'music', 'music-');
@@ -440,6 +442,7 @@ function anyCapableAgent(
 }
 
 export function hasCapableAgentForJob(ctx: RelayContext, job: Job): boolean {
+  if (job.required_device_id && job.user_id !== ctx.userId) return false;
   return anyCapableAgent(ctx, (info) => supportsJob(info, job));
 }
 
@@ -905,6 +908,7 @@ export async function assignJobToAgent(
   job: Job,
   preferredAgentId?: string
 ): Promise<boolean> {
+  if (job.required_device_id && job.user_id !== ctx.userId) return false;
   const model = job.request.model?.trim() || inferJobKind(job);
   const agent = await getOnlineAgent(ctx, (info) => supportsJob(info, job), model, preferredAgentId);
   if (!agent) {
