@@ -7,9 +7,79 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Explicit deployment declaration; never inferred from hardware or hostname.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HostingKind {
+    Workstation,
+    Runpod,
+    Other,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HostingSource {
+    OwnerDeclared,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeclaredHosting {
+    pub kind: HostingKind,
+    pub source: HostingSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+pub fn parse_declared_hosting(
+    kind: Option<&str>,
+    label: Option<&str>,
+) -> Result<Option<DeclaredHosting>, String> {
+    let kind = kind.unwrap_or("").trim();
+    let label = label.unwrap_or("").trim();
+    if kind.is_empty() && label.is_empty() {
+        return Ok(None);
+    }
+    let kind = match kind {
+        "workstation" => HostingKind::Workstation,
+        "runpod" => HostingKind::Runpod,
+        "other" => HostingKind::Other,
+        "unknown" => HostingKind::Unknown,
+        _ => {
+            return Err(
+                "MERERUN_NODE_HOSTING_KIND must be workstation, runpod, other, or unknown".into(),
+            )
+        }
+    };
+    if label.chars().count() > 80 || label.chars().any(char::is_control) {
+        return Err(
+            "MERERUN_NODE_HOSTING_LABEL must be at most 80 characters without control characters"
+                .into(),
+        );
+    }
+    Ok(Some(DeclaredHosting {
+        kind,
+        source: HostingSource::OwnerDeclared,
+        label: if label.is_empty() {
+            None
+        } else {
+            Some(label.into())
+        },
+    }))
+}
+
+pub fn declared_hosting_from_env() -> Result<Option<DeclaredHosting>, String> {
+    parse_declared_hosting(
+        std::env::var("MERERUN_NODE_HOSTING_KIND").ok().as_deref(),
+        std::env::var("MERERUN_NODE_HOSTING_LABEL").ok().as_deref(),
+    )
+}
+
 /// Capabilities advertised to the relay on connect.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentCapabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosting: Option<DeclaredHosting>,
     pub models: Vec<String>,
     pub max_resolution: u32,
     pub controlnet: bool,
@@ -898,6 +968,22 @@ mod inventory_tests {
     use super::*;
 
     #[test]
+    fn hosting_requires_explicit_bounded_declaration() {
+        assert_eq!(parse_declared_hosting(None, None).unwrap(), None);
+        assert!(parse_declared_hosting(None, Some("RunPod")).is_err());
+        assert!(parse_declared_hosting(Some("linux"), None).is_err());
+        assert!(parse_declared_hosting(Some("runpod"), Some(&"x".repeat(81))).is_err());
+        assert!(parse_declared_hosting(Some("runpod"), Some("region\nsecret")).is_err());
+        let hosting = parse_declared_hosting(Some("runpod"), Some("Owner GPU"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(hosting).unwrap(),
+            serde_json::json!({"kind":"runpod","source":"owner-declared","label":"Owner GPU"})
+        );
+    }
+
+    #[test]
     fn private_graph_messages_preserve_assignment_binding() {
         let token = "a".repeat(32);
         let request = serde_json::json!({"type": "graph_request", "job_id": "job", "owner_user_id": "owner",
@@ -960,6 +1046,7 @@ mod inventory_tests {
     fn encodes_inventory_update() {
         let message = AgentMessage::InventoryUpdate {
             capabilities: AgentCapabilities {
+                hosting: None,
                 models: vec!["image-krea2-raw".to_string()],
                 max_resolution: 2048,
                 controlnet: false,

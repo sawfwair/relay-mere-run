@@ -2,6 +2,7 @@
 //! with a Bearer token, advertises capabilities, and services image jobs by
 //! driving local `mere.run`.
 
+use crate::event_sink::NodeEvents;
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
@@ -10,7 +11,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -33,6 +33,7 @@ use crate::protocol::{
 };
 use crate::work_gate::DeviceWorkGate;
 
+type ActiveImageJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type ActiveGraphJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type ActiveChatJobs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type ActiveModelPlans = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
@@ -123,6 +124,7 @@ fn assemble_inventory(
     text_adapters: Vec<crate::protocol::TextAdapterCapability>,
 ) -> NodeInventory {
     let capabilities = AgentCapabilities {
+        hosting: fallback.capabilities.hosting,
         models: capability_models.unwrap_or(fallback.capabilities.models),
         max_resolution: fallback.capabilities.max_resolution,
         controlnet: fallback.capabilities.controlnet,
@@ -151,6 +153,7 @@ fn fallback_inventory(configured_models: &[String]) -> NodeInventory {
     models.dedup();
     NodeInventory {
         capabilities: AgentCapabilities {
+            hosting: crate::protocol::declared_hosting_from_env().unwrap_or(None),
             models,
             max_resolution: 2048,
             controlnet: false,
@@ -212,8 +215,8 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn emit<R: Runtime>(app: &AppHandle<R>, event: &str, payload: serde_json::Value) {
-    let _ = app.emit(event, payload);
+fn emit<R: NodeEvents>(app: &R, event: &str, payload: serde_json::Value) {
+    app.emit_event(event, payload);
 }
 
 fn job_kind_label(kind: &JobKind) -> &'static str {
@@ -292,8 +295,8 @@ fn is_unauthorized_ws_error(error: &WebSocketError) -> bool {
 }
 
 /// Supervisor loop: connect, serve, and reconnect until stopped.
-pub async fn run_agent<R: Runtime>(
-    app: AppHandle<R>,
+pub async fn run_agent<R: NodeEvents>(
+    app: R,
     config: NodeConfig,
     work_gate: DeviceWorkGate,
     mut stop: watch::Receiver<bool>,
@@ -384,8 +387,8 @@ pub async fn run_agent<R: Runtime>(
     );
 }
 
-async fn connect_and_serve<R: Runtime>(
-    app: &AppHandle<R>,
+async fn connect_and_serve<R: NodeEvents>(
+    app: &R,
     config: &NodeConfig,
     device_id: &str,
     work_gate: &DeviceWorkGate,
@@ -574,6 +577,7 @@ async fn connect_and_serve<R: Runtime>(
         }
     });
 
+    let active_images = ActiveImageJobs::default();
     let active_graphs = ActiveGraphJobs::default();
     let active_chats = ActiveChatJobs::default();
     let active_model_plans = ActiveModelPlans::default();
@@ -634,6 +638,7 @@ async fn connect_and_serve<R: Runtime>(
                                 ServerMessageContext {
                                     app,
                                     out_tx: &out_tx,
+                                    active_images: &active_images,
                                     active_graphs: &active_graphs,
                                     active_chats: &active_chats,
                                     active_model_plans: &active_model_plans,
@@ -664,6 +669,7 @@ async fn connect_and_serve<R: Runtime>(
                         }
                         let task_app = app.clone();
                         let task_out = out_tx.clone();
+                        let task_images = active_images.clone();
                         let task_graphs = active_graphs.clone();
                         let task_chats = active_chats.clone();
                         let task_plans = active_model_plans.clone();
@@ -677,6 +683,7 @@ async fn connect_and_serve<R: Runtime>(
                                 ServerMessageContext {
                                     app: &task_app,
                                     out_tx: &task_out,
+                                    active_images: &task_images,
                                     active_graphs: &task_graphs,
                                     active_chats: &task_chats,
                                     active_model_plans: &task_plans,
@@ -703,6 +710,7 @@ async fn connect_and_serve<R: Runtime>(
     };
 
     cancel_active_requests(&[
+        &active_images,
         &active_graphs,
         &active_chats,
         &active_model_plans,
@@ -761,9 +769,9 @@ fn is_ocr_message(text: &str) -> bool {
         .is_some_and(|message_type| matches!(message_type.as_str(), "ocr_request" | "ocr_cancel"))
 }
 
-fn spawn_special_media_message<R: Runtime>(
+fn spawn_special_media_message<R: NodeEvents>(
     request_tasks: &mut JoinSet<()>,
-    app: &AppHandle<R>,
+    app: &R,
     out_tx: &mpsc::UnboundedSender<Message>,
     active_talks: &ActiveTalkJobs,
     active_ocrs: &ActiveOcrJobs,
@@ -817,7 +825,7 @@ fn spawn_special_media_message<R: Runtime>(
     false
 }
 
-fn emit_request_error<R: Runtime>(app: &AppHandle<R>, error: anyhow::Error) {
+fn emit_request_error<R: NodeEvents>(app: &R, error: anyhow::Error) {
     emit(
         app,
         "node:log",
@@ -838,9 +846,10 @@ fn message_type(text: &str) -> Option<String> {
         })
 }
 
-struct ServerMessageContext<'a, R: Runtime> {
-    app: &'a AppHandle<R>,
+struct ServerMessageContext<'a, R: NodeEvents> {
+    app: &'a R,
     out_tx: &'a mpsc::UnboundedSender<Message>,
+    active_images: &'a ActiveImageJobs,
     active_graphs: &'a ActiveGraphJobs,
     active_chats: &'a ActiveChatJobs,
     active_model_plans: &'a ActiveModelPlans,
@@ -851,13 +860,14 @@ struct ServerMessageContext<'a, R: Runtime> {
     live_asr: &'a LiveAsrSessions,
 }
 
-async fn handle_server_message<R: Runtime>(
+async fn handle_server_message<R: NodeEvents>(
     context: ServerMessageContext<'_, R>,
     txt: &str,
 ) -> Result<()> {
     let ServerMessageContext {
         app,
         out_tx,
+        active_images,
         active_graphs,
         active_chats,
         active_model_plans,
@@ -906,7 +916,21 @@ async fn handle_server_message<R: Runtime>(
             direct_image,
             request,
         } => {
-            let _work_permit = work_gate.acquire("relay", &job_id).await;
+            let image_job = request.kind == JobKind::Image;
+            let (cancel_tx, mut cancel_rx) = watch::channel(false);
+            if image_job {
+                let mut active = active_images.lock().await;
+                if active.contains_key(&job_id) {
+                    return Ok(());
+                }
+                active.insert(job_id.clone(), cancel_tx);
+            }
+            // Register before acquiring the device slot so queued images can also cancel.
+            let work_permit = tokio::select! {
+                biased;
+                _ = wait_image_cancellation(&mut cancel_rx), if image_job => None,
+                permit = work_gate.acquire("relay", &job_id) => Some(permit),
+            };
             let kind = job_kind_label(&request.kind);
             emit(
                 app,
@@ -956,7 +980,18 @@ async fn handle_server_message<R: Runtime>(
             });
 
             let started = Instant::now();
-            let job_outcome = run_job(&request, &job_id, progress_tx).await;
+            let job_outcome = if work_permit.is_none() {
+                drop(progress_tx);
+                Err(anyhow!("image generation cancelled"))
+            } else if image_job {
+                tokio::select! {
+                    biased;
+                    _ = wait_image_cancellation(&mut cancel_rx) => Err(anyhow!("image generation cancelled")),
+                    result = run_job(&request, &job_id, progress_tx) => result,
+                }
+            } else {
+                run_job(&request, &job_id, progress_tx).await
+            };
             // run_job dropped its sender; wait for queued progress to flush so
             // the relay never sees progress after the result.
             let _ = progress_forwarder.await;
@@ -993,13 +1028,39 @@ async fn handle_server_message<R: Runtime>(
                 },
             };
 
+            let mut result_msg = result_msg;
+            if image_job && *cancel_rx.borrow() {
+                if let AgentMessage::Result {
+                    success,
+                    image_url,
+                    image_data,
+                    media_url,
+                    media_data,
+                    error,
+                    ..
+                } = &mut result_msg
+                {
+                    *success = false;
+                    *image_url = None;
+                    *image_data = None;
+                    *media_url = None;
+                    *media_data = None;
+                    *error = Some("image generation cancelled".to_string());
+                }
+            }
+            let canceled = image_job && *cancel_rx.borrow();
+            // Release the permit and active entry before the relay can reassign this job.
+            drop(work_permit);
+            if image_job {
+                active_images.lock().await.remove(&job_id);
+            }
             let ok = matches!(&result_msg, AgentMessage::Result { success, .. } if *success);
             out_tx.send(Message::Text(serde_json::to_string(&result_msg)?.into()))?;
             emit(
                 app,
                 "node:job",
                 serde_json::json!({
-                    "job_id": job_id, "kind": kind, "state": if ok { "done" } else { "failed" },
+                    "job_id": job_id, "kind": kind, "state": if canceled { "canceled" } else if ok { "done" } else { "failed" },
                 }),
             );
         }
@@ -1241,7 +1302,9 @@ async fn handle_server_message<R: Runtime>(
             });
         }
         ServerMessage::Cancel { job_id } => {
-            // TODO: cooperative cancellation of an in-flight mere.run process.
+            if let Some(cancel) = active_images.lock().await.get(&job_id) {
+                let _ = cancel.send(true);
+            }
             emit(
                 app,
                 "node:log",
@@ -1471,6 +1534,17 @@ async fn build_success(
     }
 }
 
+async fn wait_image_cancellation(cancel: &mut watch::Receiver<bool>) {
+    if *cancel.borrow() {
+        return;
+    }
+    while cancel.changed().await.is_ok() {
+        if *cancel.borrow() {
+            return;
+        }
+    }
+}
+
 async fn run_job(
     req: &JobRequest,
     job_id: &str,
@@ -1480,14 +1554,14 @@ async fn run_job(
     mererun::generate_job_output(req, &dir, job_id, Some(progress)).await
 }
 
-struct AsrExecutionContext<'a, R: Runtime> {
-    app: &'a AppHandle<R>,
+struct AsrExecutionContext<'a, R: NodeEvents> {
+    app: &'a R,
     out_tx: &'a mpsc::UnboundedSender<Message>,
     active_asrs: &'a ActiveAsrJobs,
     work_gate: &'a DeviceWorkGate,
 }
 
-async fn execute_asr_request<R: Runtime>(
+async fn execute_asr_request<R: NodeEvents>(
     context: AsrExecutionContext<'_, R>,
     asr_id: String,
     client_id: String,
@@ -1562,11 +1636,7 @@ async fn build_asr_result(
     }
 }
 
-async fn cancel_asr_request<R: Runtime>(
-    app: &AppHandle<R>,
-    active_asrs: &ActiveAsrJobs,
-    asr_id: &str,
-) {
+async fn cancel_asr_request<R: NodeEvents>(app: &R, active_asrs: &ActiveAsrJobs, asr_id: &str) {
     if let Some(cancel) = active_asrs.lock().await.get(asr_id) {
         let _ = cancel.send(true);
     }
@@ -1588,8 +1658,8 @@ async fn run_asr(
     mererun::transcribe_speech(req, &dir, asr_id, cancel).await
 }
 
-async fn handle_chat_server_message<R: Runtime>(
-    app: &AppHandle<R>,
+async fn handle_chat_server_message<R: NodeEvents>(
+    app: &R,
     out_tx: &mpsc::UnboundedSender<Message>,
     active_chats: &ActiveChatJobs,
     work_gate: &DeviceWorkGate,
@@ -1659,14 +1729,14 @@ async fn run_chat(req: &ChatRequest, cancel: watch::Receiver<bool>) -> Result<St
     mererun::chat_text(req, cancel).await
 }
 
-struct TalkExecutionContext<'a, R: Runtime> {
-    app: &'a AppHandle<R>,
+struct TalkExecutionContext<'a, R: NodeEvents> {
+    app: &'a R,
     out_tx: &'a mpsc::UnboundedSender<Message>,
     active_talks: &'a ActiveTalkJobs,
     work_gate: &'a DeviceWorkGate,
 }
 
-async fn handle_talk_server_message<R: Runtime>(
+async fn handle_talk_server_message<R: NodeEvents>(
     context: TalkExecutionContext<'_, R>,
     text: &str,
 ) -> Result<()> {
@@ -1707,7 +1777,7 @@ async fn handle_talk_server_message<R: Runtime>(
     }
 }
 
-async fn execute_talk_request<R: Runtime>(
+async fn execute_talk_request<R: NodeEvents>(
     context: TalkExecutionContext<'_, R>,
     talk_id: String,
     client_id: String,
@@ -1823,14 +1893,14 @@ async fn build_talk_result(
     }
 }
 
-struct OcrExecutionContext<'a, R: Runtime> {
-    app: &'a AppHandle<R>,
+struct OcrExecutionContext<'a, R: NodeEvents> {
+    app: &'a R,
     out_tx: &'a mpsc::UnboundedSender<Message>,
     active_ocrs: &'a ActiveOcrJobs,
     work_gate: &'a DeviceWorkGate,
 }
 
-async fn handle_ocr_server_message<R: Runtime>(
+async fn handle_ocr_server_message<R: NodeEvents>(
     context: OcrExecutionContext<'_, R>,
     text: &str,
 ) -> Result<()> {
@@ -1858,7 +1928,7 @@ async fn handle_ocr_server_message<R: Runtime>(
     }
 }
 
-async fn execute_ocr_request<R: Runtime>(
+async fn execute_ocr_request<R: NodeEvents>(
     context: OcrExecutionContext<'_, R>,
     ocr_id: String,
     client_id: String,
@@ -1971,6 +2041,71 @@ async fn upload_output(upload_url: &str, content_type: &str, bytes: Vec<u8>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn image_cancel_and_disconnect_release_queued_requests_without_starting_generation() {
+        for disconnected in [false, true] {
+            let app = crate::event_sink::NoopEvents;
+            let (out, mut messages) = mpsc::unbounded_channel();
+            let images = ActiveImageJobs::default();
+            let other = ActiveGraphJobs::default();
+            let gate = DeviceWorkGate::default();
+            let held = gate.acquire("test", "other-work").await;
+            let live = LiveAsrSessions::new(gate.clone(), out.clone());
+            let context = || ServerMessageContext {
+                app: &app,
+                out_tx: &out,
+                active_images: &images,
+                active_graphs: &other,
+                active_chats: &other,
+                active_model_plans: &other,
+                active_asrs: &other,
+                active_tools: &other,
+                configured_models: &[],
+                work_gate: &gate,
+                live_asr: &live,
+            };
+            let request = serde_json::json!({
+                "type": "job", "job_id": "queued-image", "owner_user_id": "owner",
+                "upload_url": "http://unused.invalid", "request": { "kind": "image", "prompt": "unused", "width": 64, "height": 64 }
+            }).to_string();
+            let operation = async {
+                let (job, _) = tokio::join!(handle_server_message(context(), &request), async {
+                    while !images.lock().await.contains_key("queued-image") {
+                        tokio::task::yield_now().await;
+                    }
+                    if disconnected {
+                        cancel_active_requests(&[&images]).await;
+                    } else {
+                        handle_server_message(
+                            context(),
+                            r#"{"type":"cancel","job_id":"queued-image"}"#,
+                        )
+                        .await
+                        .unwrap();
+                    }
+                });
+                job.unwrap();
+            };
+            tokio::time::timeout(Duration::from_secs(2), operation)
+                .await
+                .expect("queued image ignored cancellation");
+            assert!(images.lock().await.is_empty());
+            assert_eq!(gate.current().work_id, "other-work");
+            let mut results = Vec::new();
+            while let Ok(message) = messages.try_recv() {
+                let payload: serde_json::Value =
+                    serde_json::from_str(message.to_text().unwrap()).unwrap();
+                if payload["type"] == "result" {
+                    results.push(payload);
+                }
+            }
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0]["success"], false);
+            assert_eq!(results[0]["error"], "image generation cancelled");
+            drop(held);
+        }
+    }
 
     #[test]
     fn routes_ocr_messages_to_the_typed_dispatcher() {
@@ -2128,8 +2263,7 @@ mod tests {
             device_id: device_id.clone(),
             models: Vec::new(),
         };
-        let app = tauri::test::mock_app();
-        let app_handle = app.handle().clone();
+        let app_handle = crate::event_sink::NoopEvents;
         let connected_device_id = device_id.clone();
         let (stop_tx, stop_rx) = watch::channel(false);
         let mut agent_task = tokio::spawn(async move {
@@ -2269,14 +2403,9 @@ mod tests {
             models: Vec::new(),
         };
 
-        let app = tauri::test::mock_app();
+        let app = crate::event_sink::NoopEvents;
         let (stop_tx, stop_rx) = watch::channel(false);
-        let agent_task = tokio::spawn(run_agent(
-            app.handle().clone(),
-            config,
-            DeviceWorkGate::default(),
-            stop_rx,
-        ));
+        let agent_task = tokio::spawn(run_agent(app, config, DeviceWorkGate::default(), stop_rx));
 
         // Wait for the throwaway node to come online, then grab its agent_id.
         let deadline = Instant::now() + Duration::from_secs(60);

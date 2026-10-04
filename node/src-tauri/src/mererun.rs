@@ -825,13 +825,40 @@ fn push_tail(tail: &mut Vec<u8>, chunk: &[u8]) {
     }
 }
 
-/// Run a prepared `mere.run` command, streaming stderr for per-step progress
-/// while retaining a bounded tail for error reporting.
+/// Own the image process group and its output drain for cancellation-safe drops.
+struct ImageProcessGuard {
+    process_id: u32,
+    stdout_drain: tokio::task::JoinHandle<()>,
+    armed: bool,
+}
+
+impl Drop for ImageProcessGuard {
+    fn drop(&mut self) {
+        self.stdout_drain.abort();
+        #[cfg(unix)]
+        if self.armed {
+            // This child owns a fresh process group. Kill descendants too if the
+            // generation future is canceled or its pipe reader fails.
+            unsafe {
+                libc::kill(-(self.process_id as i32), libc::SIGKILL);
+            }
+        }
+    }
+}
+
+/// Run a prepared command with bounded progress/error capture and drop-safe teardown.
 async fn run_streaming_with_progress(
     mut cmd: Command,
     progress: Option<&ProgressSender>,
 ) -> Result<std::process::ExitStatus> {
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.as_std_mut().process_group(0);
+    }
     let mut child = cmd.spawn()?;
 
     let mut stdout = child
@@ -839,9 +866,13 @@ async fn run_streaming_with_progress(
         .take()
         .ok_or_else(|| anyhow!("child stdout unavailable"))?;
     let stdout_drain = tokio::spawn(async move {
-        let mut sink = Vec::new();
-        let _ = stdout.read_to_end(&mut sink).await;
+        let _ = tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await;
     });
+    let mut process_guard = ImageProcessGuard {
+        process_id: child.id().ok_or_else(|| anyhow!("child pid unavailable"))?,
+        stdout_drain,
+        armed: true,
+    };
 
     let mut stderr = child
         .stderr
@@ -864,7 +895,8 @@ async fn run_streaming_with_progress(
     }
 
     let status = child.wait().await?;
-    let _ = stdout_drain.await;
+    let _ = (&mut process_guard.stdout_drain).await;
+    process_guard.armed = false;
     if !status.success() {
         let stderr_text = String::from_utf8_lossy(&tail);
         return Err(anyhow!(
@@ -3352,6 +3384,88 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
             "steps": 4
         }))
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn dropping_image_execution_terminates_its_subprocess() {
+        use std::time::Duration;
+        let pid_file =
+            std::env::temp_dir().join(format!("mere-image-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_file(&pid_file);
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("echo $$ > \"$1\"; exec sleep 30")
+            .arg("image-test")
+            .arg(&pid_file);
+        let task = tokio::spawn(async move { run_streaming_with_progress(command, None).await });
+        let pid = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&pid_file).await {
+                    if let Ok(pid) = text.trim().parse::<i32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("image subprocess never started");
+        task.abort();
+        let _ = task.await;
+        let stopped = tokio::time::timeout(Duration::from_secs(2), async {
+            while unsafe { libc::kill(pid, 0) } == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        // Clean up the known test child even when exercising the broken implementation.
+        if !stopped {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        let _ = tokio::fs::remove_file(pid_file).await;
+        assert!(
+            stopped,
+            "canceling image execution left the generation subprocess running"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_image_execution_terminates_descendant_processes() {
+        use std::time::Duration;
+        let dir =
+            std::env::temp_dir().join(format!("mere-image-descendant-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let started = dir.join("started");
+        let escaped = dir.join("escaped");
+        let _ = std::fs::remove_file(&started);
+        let _ = std::fs::remove_file(&escaped);
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("(sleep 0.5; echo escaped > \"$2\") & echo ready > \"$1\"; wait")
+            .arg("image-test")
+            .arg(&started)
+            .arg(&escaped);
+        let task = tokio::spawn(async move { run_streaming_with_progress(command, None).await });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("image subtree never started");
+        task.abort();
+        let _ = task.await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            !escaped.exists(),
+            "generation descendant survived cancellation"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// End-to-end at the process boundary: a fake `mere.run` streams progress
