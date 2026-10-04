@@ -127,22 +127,35 @@ Set `MERERUN_NODE_HOSTING_KIND` explicitly to `workstation`, `runpod`, `other`, 
 
 The shared enrollment and inventory protocol carries `capabilities.hosting` with `source: "owner-declared"`. Relay validates that bounded declaration and returns it in the authenticated account's status inventory. It is an owner's declaration, not provider verification. The label is descriptive configuration; never place credentials in it. Canceling an inference job does not stop a RunPod Pod or its storage billing.
 
-The final private image is
-`sha256:21785e06c41070a20920db75827fde153690548036aa42b4db3f3fc06e438671`,
+The current release pin is [release-image.json](release-image.json):
+`sha256:12d482ce8c9f50a46b60a13eb832dfba2c525aafa4b1c1d8686f46b427faa2db`,
 Linux daemon SHA256
-`c0e33f6bf004a83b4b666f5c717cc657b58c5f4c2dcb6dab6c9bf35aca409c7b`.
-It adds standalone permission verification after the live predecessor-image
-checks. Its native suite, cross-build, and local container checks pass. The
-Animatic `reports/roadmap-qualification/headless-container.json` receipt records
-that qualification boundary and links the exact live GPU/state image digests.
-All four qualification Pods and provider registry-auth entries were deleted.
-Elapsed-rate compute was US$0.1619; final billing/storage records were pending.
+`fd94712054391ee0bb7819959e0d0d614ffa0f3ea702d34088186f855fd2183d`.
+Its runtime source and OCI revision label are commit
+`125a6e250308fd6375c4d33ae2cbd35d6c9ef2e2`; the later release-pin commit only
+records that build and changes the host-side controller default, not image inputs.
+All 30 source/recipe inputs matched the runtime source commit. The pinned CUDA
+archive checksum was verified before building.
+
+That source passed full Worker/web, macOS Rust, and Linux Rust/package CI in
+[run 37214097733](https://github.com/sawfwair/relay-mere-run/actions/runs/37214097733).
+The generation handler was extracted to satisfy the existing Clippy threshold;
+its execution body is unchanged apart from whitespace. Local desktop tests pass
+135/6 ignored and headless tests pass 130/6 ignored. The rebuilt image passed help,
+private bootstrap, ineffective-permission rejection, and expected rejection of
+unenrolled startup/health. These are CPU/container checks, not a new GPU run.
+
+The independent live A40 inference and provider restart receipts used earlier
+image digests. The Animatic `reports/roadmap-qualification/headless-container.json`
+receipt keeps those separate from this release. All four qualification Pods and
+provider registry-auth entries were deleted. Elapsed-rate compute was US$0.1619;
+final billing/storage records remained pending at the 15:28:55 UTC check.
 
 ## Approved account run
 
 See [ACCOUNT-QUALIFICATION.md](ACCOUNT-QUALIFICATION.md) for the bounded real-Node
 controller, exact-node Relay qualifier, scoped revocation, and application hook
-contract. The controller/client offline suite passes 17 tests. It rejects a
+contract. The controller/client offline suite passes 19 tests. It rejects a
 missing or wrong-scope grant and checks live placement support before rental.
 No account run has occurred while approval remains absent. The CLI prints the
 broker's actual grant expiry; the earlier ten-minute approval estimate was not

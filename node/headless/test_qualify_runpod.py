@@ -19,6 +19,20 @@ class Response(io.BytesIO):
 
 
 class QualificationTests(unittest.TestCase):
+    def test_reviewed_image_manifest_is_the_default_and_explicit_pin_overrides_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = pathlib.Path(directory) / 'release-image.json'
+            reviewed = 'registry.example/node@sha256:' + 'a' * 64
+            override = 'registry.example/node@sha256:' + 'b' * 64
+            manifest.write_text(json.dumps({'image': reviewed}))
+            self.assertEqual(qualifier.resolve_image(manifest_path=manifest), reviewed)
+            self.assertEqual(qualifier.resolve_image(override, manifest), override)
+
+    def test_mutable_or_incomplete_image_references_are_rejected(self):
+        for value in ['registry.example/node:latest', 'node@sha256:abc', 'node@sha256:' + 'a' * 63]:
+            with self.assertRaises(ValueError):
+                qualifier.resolve_image(value)
+
     def test_approved_auth_missing_or_wrong_scope_fails_before_rental(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / 'auth.json'
@@ -95,7 +109,7 @@ class QualificationTests(unittest.TestCase):
                 self.fail('Unexpected request: ' + request.full_url)
 
             output = io.StringIO()
-            argv = ['qualify', '--image', 'example/image@sha256:abc', '--registry-password-file', str(root / 'password'),
+            argv = ['qualify', '--image', 'example/image@sha256:' + 'a' * 64, '--registry-password-file', str(root / 'password'),
                     '--registry-username', 'account', '--env-file', str(root / 'env'), '--receipt-dir', str(root / 'receipt'), '--execute']
             if restart:
                 argv.append('--restart-probe')

@@ -33,8 +33,9 @@ than `gpu-preflight`. It privately supplies the dedicated grant to the existing
 atomic container bootstrap, discovers only its unique qualification Node name,
 then starts `qualify-relay.py`. Other Nodes are not selected or modified. Its
 one-hour provider deadline, rate limits, unknown-create reconciliation, and
-owned-resource cleanup still apply. Existing registry/image arguments remain
-required. `--state-only` and `--restart-probe` cannot be combined with account mode.
+owned-resource cleanup still apply. The image defaults to the immutable `release-image.json` pin. An explicit
+`--image` override requires a full SHA256 digest; mutable tags are rejected before
+provider requests. Registry credential arguments remain required. `--state-only` and `--restart-probe` cannot be combined with account mode.
 
 The default Relay qualifier installs only `image-zimage-nano` through the real
 model-plan protocol with license acceptance disabled, requests one 512×512
@@ -137,7 +138,7 @@ and its media remain for review.
 The hook's nine offline tests cover successful contract sequencing, owner/device/
 agent mismatch, missing placement support, invalid rendered frame count,
 ambiguous mutation replay refusal, origin protection and polling bounds. Syntax
-and ESLint checks passed. Together with nine controller and eight Relay API tests,
+and ESLint checks passed. Together with eleven controller and eight Relay API tests,
 these are harness evidence only; the real account chain remains pending.
 
 The latest enrollment ended with the broker's `expired_token` response at about

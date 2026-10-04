@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Bounded GPU-only preflight; does not enroll or claim a Relay job.
+"""Bounded GPU preflight or explicitly approved Node account qualification.
 
-Requires explicit image and a pull-only registry credential file. Credentials
-are never part of the receipt. Only resources created by this run are deleted.
+Uses the immutable release pin and a pull-only registry credential file. This
+controller never initiates enrollment. Credentials are never part of the receipt.
+Only resources created by this run are deleted.
 """
 import argparse
 import base64
@@ -32,6 +33,16 @@ def credential(path):
     if not match:
         raise RuntimeError('RUNPOD_API_KEY is absent')
     return shlex.split(match.group(1))[0]
+
+
+def resolve_image(image=None, manifest_path=None):
+    """Use the reviewed release pin unless an explicit immutable override is supplied."""
+    if not image:
+        source = pathlib.Path(manifest_path) if manifest_path else pathlib.Path(__file__).with_name('release-image.json')
+        image = json.loads(source.read_text())['image']
+    if not isinstance(image, str) or not re.fullmatch(r'[^\s]+@sha256:[0-9a-f]{64}', image):
+        raise ValueError('Use an immutable image with its full SHA256 digest')
+    return image
 
 
 def approved_node_auth(path):
@@ -87,7 +98,7 @@ def log_entries(stream, max_frame_bytes=1024 * 1024):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--image', required=True)
+    parser.add_argument('--image', help='Immutable override; defaults to the reviewed release-image.json pin')
     parser.add_argument('--registry-password-file', required=True)
     parser.add_argument('--registry-username', required=True)
     parser.add_argument('--env-file', default=str(pathlib.Path.home() / '.env'))
@@ -100,8 +111,10 @@ def main():
     args = parser.parse_args()
     if not args.execute:
         parser.error('--execute is required to create paid resources')
-    if '@sha256:' not in args.image:
-        parser.error('Use an immutable image digest')
+    try:
+        args.image = resolve_image(args.image)
+    except (OSError, KeyError, ValueError):
+        parser.error('The release image pin is unavailable or invalid; provide --image with a full immutable SHA256 digest')
     if args.node_auth_file and (args.state_only or args.restart_probe):
         parser.error('Account mode cannot be combined with standalone preflight probes')
     if args.account_hook and (not args.node_auth_file or not os.access(args.account_hook, os.X_OK)):
