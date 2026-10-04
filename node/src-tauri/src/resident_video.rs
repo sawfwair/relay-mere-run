@@ -23,6 +23,27 @@ struct Session {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     stderr_tail: Arc<Mutex<String>>,
+    stderr_drain: tokio::task::JoinHandle<()>,
+}
+
+impl Session {
+    fn terminate(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.child.id() {
+            // The session owns this process group, including generation children.
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+        }
+        let _ = self.child.start_kill();
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.stderr_drain.abort();
+        self.terminate();
+    }
 }
 
 #[derive(Default)]
@@ -120,7 +141,15 @@ pub fn request(
 /// Returns `None` when the installed CLI has no session contract, allowing
 /// the caller to use the unchanged one-shot path.
 pub async fn generate(binary: &Path, request: &Value, output: &Path) -> Result<Option<()>> {
-    let pool = pool();
+    generate_in_pool(pool(), binary, request, output).await
+}
+
+async fn generate_in_pool(
+    pool: Arc<Pool>,
+    binary: &Path,
+    request: &Value,
+    output: &Path,
+) -> Result<Option<()>> {
     let mut held = pool.session.lock().await;
     if held
         .as_mut()
@@ -153,10 +182,13 @@ pub async fn generate(binary: &Path, request: &Value, output: &Path) -> Result<O
         }
         *held = Some(start(binary).await?);
     }
-    let result = run(held.as_mut().expect("session was started"), request, output).await;
-    if result.is_err() {
-        stop(&mut held).await;
-    } else {
+    // Own the session in this future while a request is active. Cancellation
+    // drops it and kills its process group instead of returning stale work to
+    // the pool. Only a fully completed request may reuse the resident model.
+    let mut session = held.take().expect("session was started");
+    let result = run(&mut session, request, output).await;
+    if result.is_ok() {
+        *held = Some(session);
         let epoch = pool.epoch.fetch_add(1, Ordering::SeqCst) + 1;
         let idle_pool = pool.clone();
         tokio::spawn(async move {
@@ -188,13 +220,19 @@ impl Pool {
 }
 
 async fn start(binary: &Path) -> Result<Session> {
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(["video", "session", "--model", MODEL, "--quiet"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+    let mut child = command.spawn()?;
     let stdin = child
         .stdin
         .take()
@@ -209,7 +247,7 @@ async fn start(binary: &Path) -> Result<Session> {
         .ok_or_else(|| anyhow!("LTX session stderr unavailable"))?;
     let stderr_tail = Arc::new(Mutex::new(String::new()));
     let tail = stderr_tail.clone();
-    tokio::spawn(async move {
+    let stderr_drain = tokio::spawn(async move {
         let mut chunk = [0_u8; 4096];
         while let Ok(count) = stderr.read(&mut chunk).await {
             if count == 0 {
@@ -233,6 +271,7 @@ async fn start(binary: &Path) -> Result<Session> {
         stdin,
         stdout: BufReader::new(stdout),
         stderr_tail,
+        stderr_drain,
     })
 }
 
@@ -275,14 +314,8 @@ async fn stop(slot: &mut Option<Session>) {
     let Some(mut session) = slot.take() else {
         return;
     };
-    let _ = session.stdin.shutdown().await;
-    drop(session.stdin);
-    if tokio::time::timeout(Duration::from_secs(10), session.child.wait())
-        .await
-        .is_err()
-    {
-        let _ = session.child.kill().await;
-    }
+    session.terminate();
+    let _ = session.child.wait().await;
 }
 
 #[cfg(test)]
@@ -422,6 +455,52 @@ mod tests {
         );
         close().await;
         tokio::fs::remove_dir_all(&root).await.expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_resident_generation_terminates_descendants_and_discards_session() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("resident-video-cancel-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let binary = root.join("fake-video");
+        let output = root.join("output.mp4");
+        let started = root.join("started");
+        let _ = std::fs::remove_file(&output);
+        let _ = std::fs::remove_file(&started);
+        std::fs::write(&binary, format!(
+            "#!/bin/sh\nif [ \"$3\" = \"--help\" ]; then echo --prompt-cache-capacity; exit 0; fi\nread -r line\n(sleep 0.5; echo late > '{}') & echo started > '{}'; wait\n",
+            output.display(), started.display(),
+        )).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let pool = Arc::new(Pool::default());
+        let task_pool = pool.clone();
+        let task_output = output.clone();
+        let task = tokio::spawn(async move {
+            let mapped =
+                request(&draft_request(), MODEL, "film-1", &task_output, None, None).unwrap();
+            generate_in_pool(task_pool, &binary, &mapped, &task_output).await
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("resident subtree never started");
+        task.abort();
+        let _ = task.await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let leaked = output.exists();
+        let stale = pool.session.lock().await.is_some();
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(root);
+        assert!(
+            !leaked,
+            "resident descendant produced output after cancellation"
+        );
+        assert!(!stale, "canceled resident session was retained for reuse");
     }
 
     /// Run explicitly with MERE_RUN_BINARY, LTX25_IMAGE_PATH, and
