@@ -124,6 +124,7 @@ fn assemble_inventory(
     text_adapters: Vec<crate::protocol::TextAdapterCapability>,
 ) -> NodeInventory {
     let capabilities = AgentCapabilities {
+        video_request_controls: Some(1),
         hosting: fallback.capabilities.hosting,
         models: capability_models.unwrap_or(fallback.capabilities.models),
         max_resolution: fallback.capabilities.max_resolution,
@@ -153,6 +154,7 @@ fn fallback_inventory(configured_models: &[String]) -> NodeInventory {
     models.dedup();
     NodeInventory {
         capabilities: AgentCapabilities {
+            video_request_controls: Some(1),
             hosting: crate::protocol::declared_hosting_from_env().unwrap_or(None),
             models,
             max_resolution: 2048,

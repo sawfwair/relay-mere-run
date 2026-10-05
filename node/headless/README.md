@@ -127,7 +127,7 @@ Set `MERERUN_NODE_HOSTING_KIND` explicitly to `workstation`, `runpod`, `other`, 
 
 The shared enrollment and inventory protocol carries `capabilities.hosting` with `source: "owner-declared"`. Relay validates that bounded declaration and returns it in the authenticated account's status inventory. It is an owner's declaration, not provider verification. The label is descriptive configuration; never place credentials in it. Canceling an inference job does not stop a RunPod Pod or its storage billing.
 
-The current release pin is [release-image.json](release-image.json):
+The previous video-cancellation release was:
 `sha256:458e435c539cec768361fab6c8f4707e4ced46eb45648aaf67086ef8b26da440`,
 Linux daemon SHA256
 `778f0e3bce25c884405b3161def6a8063ce92d5e48d410e41df5b2e9268317d7`.
@@ -170,3 +170,34 @@ missing or wrong-scope grant and checks live placement support before rental.
 No account run has occurred while approval remains absent. The CLI prints the
 broker's actual grant expiry; the earlier ten-minute approval estimate was not
 a measured server lifetime.
+
+## Video request controls, version 1
+
+The Node advertises `capabilities.video_request_controls: 1`. A matching Relay
+advertises `video_request_controls: 1` in status and requires that Node capability
+for jobs with explicit steps, preflight, or process retry controls, including
+untargeted jobs and lease recovery. Older Nodes are ineligible for those jobs.
+
+This version forwards exact `steps` to the video CLI and supports
+`preflight_required: true` plus `max_oom_retries: 0`. Controlled jobs use one-shot
+execution. Before generation, required preflight runs the identical arguments
+with `--preflight --json`, bounded to 120 seconds and a 1 MiB report. Malformed,
+blocked, or warning reports stop before generation. Cancellation terminates the
+preflight process group and suppresses generation. After a passing preflight,
+the Node starts at most one generation process; a process OOM does not trigger a
+Node retry. Relay lease recovery remains a separate policy and can reassign work
+when a lease is lost.
+
+The pinned mere.run 0.60.1 preflight validates request/model/input readiness; it
+is not GPU memory admission. Every explicit `memory_policy` and every nonzero
+`max_oom_retries` is rejected. Do not substitute an invented auto/conservative
+policy or infer GPU qualification from CPU fake-process tests. Matching new
+Relay and Node releases are required before using this contract in production.
+
+The current [release image](release-image.json) is the CPU-qualified video-controls
+build from source `ec72d375b615a981985dad16a5c01b2b89443727`. Its immutable image,
+daemon checksum, pinned runtime, and qualification boundaries are recorded there.
+[Build inputs](video-controls-build-inputs.json) match that source commit, and
+[CPU checks](video-controls-qualification.json) retain the release evidence.
+This supersedes the earlier pin; historical A40 inference belongs to predecessor
+images and does not qualify GPU video inference on the current image.

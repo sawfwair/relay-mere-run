@@ -1,0 +1,42 @@
+{
+  "sourceCommit": "ec72d375b615a981985dad16a5c01b2b89443727",
+  "platform": "linux/amd64",
+  "daemonSha256": "bebcaff3eb1ab09a9a793ef7c307054535b85f0e0d0d2473b1fb8f8641135844",
+  "helpPassed": true,
+  "headlessTestsPassed": 141,
+  "headlessTestsIgnored": 6,
+  "desktopCargoCheckPassed": true,
+  "clippyPassed": true,
+  "runtimeVersion": "0.60.1",
+  "runtimeArchiveSha256": "c465064323a63ddb06b6455f506f55bb6c7b629839105d329b362621807623f6",
+  "runtimeCpuVersionProbe": "unavailable: libcuda.so.1 missing; no inference attempted",
+  "gpuVideoQualified": false,
+  "health": {
+    "exitCode": 1,
+    "expectedFailureWithoutEnrollment": true
+  },
+  "unenrolledStartup": {
+    "exitCode": 1,
+    "expectedFailureWithoutEnrollment": true
+  },
+  "image": "registry.cloudflare.com/d49787aa3908b52ac1bf58ba6d6375f1/animatic-headless-node@sha256:3aa4e9a0a703867687459b2369b82e0c8421bb268a7d87f269ab64888883a401",
+  "publishedAt": "2026-10-05T04:14:00.931401+00:00",
+  "temporaryRegistryCredential": {
+    "localConfigRemoved": true,
+    "expiresAt": "2026-10-05T04:28:54.924427+00:00",
+    "permissions": [
+      "push",
+      "pull"
+    ],
+    "perTokenRevocationAvailable": false,
+    "revocationBasis": "Cloudflare documented credentials resource exposes generation/expiry only; no per-token revoke endpoint. Registry deletion was not used.",
+    "documentation": "https://developers.cloudflare.com/api/resources/containers/subresources/registries/"
+  },
+  "controllerTestsPassed": 23,
+  "workerTestsPassed": 205,
+  "fastVerification": "7 gates passed, including205Worker tests",
+  "runtimeMemoryAdmissionQualified": false,
+  "relayDeployed": false,
+  "newGpuResources": 0,
+  "providerCalls": 0
+}

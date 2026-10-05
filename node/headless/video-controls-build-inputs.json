@@ -1,0 +1,126 @@
+{
+  "sourceCommit": "ec72d375b615a981985dad16a5c01b2b89443727",
+  "runtimeArchiveSha256": "c465064323a63ddb06b6455f506f55bb6c7b629839105d329b362621807623f6",
+  "sourceSHA256": [
+    {
+      "file": "node/headless/Cargo.lock",
+      "sha256": "e9bd51b032d736d793e0078c244e10c89585e0a27b9d65431479245a761e2a21"
+    },
+    {
+      "file": "node/headless/Cargo.toml",
+      "sha256": "aafb8b82d77e0df3ff87cee4a46d4f320925baead7ebb7d7ab1b303addfa6869"
+    },
+    {
+      "file": "node/headless/Dockerfile",
+      "sha256": "cb820a04c7b93147b1d80549718d13d1c0bce78c7427c738036c0c0391fd1981"
+    },
+    {
+      "file": "node/headless/Dockerfile.dockerignore",
+      "sha256": "dea56c0662737cf638fa5904784fc66391243c9a73737ee269f0e805b2a91ebc"
+    },
+    {
+      "file": "node/headless/container-entrypoint.sh",
+      "sha256": "17779c5e2be2f746813685f5aeddea5370998f17ac83e7d20a648a0e6fa88017"
+    },
+    {
+      "file": "node/headless/gpu-preflight.sh",
+      "sha256": "6ef1afe5964af4a6b79bb1a737ef7d4f7f5332c6e67749f01da03be8eea6c70a"
+    },
+    {
+      "file": "node/headless/src/daemon.rs",
+      "sha256": "73caa99087d8076a1a03e772d621e967910d534f7accb0c728b30ea98cc24eaa"
+    },
+    {
+      "file": "node/headless/src/lib.rs",
+      "sha256": "316b0b288054bf0946721af7bbd84dc0b3ef1ba4f548f97ea9363e88d6579119"
+    },
+    {
+      "file": "node/headless/src/main.rs",
+      "sha256": "4e372fad08f27d76e957d672bc860a2e32a3530c5d12b87afe8a598e47640364"
+    },
+    {
+      "file": "node/src-tauri/src/agent.rs",
+      "sha256": "5ce268ca698ae91c7a27f856782f3e6c9309c6195be537d8a742ab5e315dfddc"
+    },
+    {
+      "file": "node/src-tauri/src/asr_stream.rs",
+      "sha256": "15b74b9a1466aebaa4862338242910f8fdfde7ad344b621ab6bb46d07b1f53db"
+    },
+    {
+      "file": "node/src-tauri/src/config.rs",
+      "sha256": "c207f6c5d5ea809f5b22b7eef91abc385bb7262c2330d08b4e93704de948bb6a"
+    },
+    {
+      "file": "node/src-tauri/src/deviceauth.rs",
+      "sha256": "f847d44cfba6f0aae6ab33211efeb1adc4e6abc58ae2810e25b74db560f6fb0e"
+    },
+    {
+      "file": "node/src-tauri/src/event_sink.rs",
+      "sha256": "5a32dcd525fd6a28c6c141e5b1b647137e8a7e75016c56eaac299f9c36f960ae"
+    },
+    {
+      "file": "node/src-tauri/src/graph.rs",
+      "sha256": "73bda892fd8bca758e31e26c3b07e47791379737d7edae864c8f626375df028b"
+    },
+    {
+      "file": "node/src-tauri/src/graph_custody.rs",
+      "sha256": "f4a883bc88d9f121b13afa8363ca1448b5657152cf1a5db6fdcf379ec6d31213"
+    },
+    {
+      "file": "node/src-tauri/src/hardware.rs",
+      "sha256": "ab2a32dd4629e4f086ee74d7006256d5679f3b2e6dbf0416b70749f7c67c5db9"
+    },
+    {
+      "file": "node/src-tauri/src/lib.rs",
+      "sha256": "51f7991f9c9b4123c687f307264d53ee25e4f176953e58e68bfa049592ff46ff"
+    },
+    {
+      "file": "node/src-tauri/src/linux_startup.rs",
+      "sha256": "8cf345fa520c28c0e2d55ceeb78dee57edc29b55dd617bec4147b635215563f9"
+    },
+    {
+      "file": "node/src-tauri/src/main.rs",
+      "sha256": "b5c0d49f519b7a2524fa079d486960ae36021c47236a4d730745a3a32176fb77"
+    },
+    {
+      "file": "node/src-tauri/src/mererun.rs",
+      "sha256": "beaad78694163753efea0f47a157c6a030407de7e5e10b4f08a93f49f302d477"
+    },
+    {
+      "file": "node/src-tauri/src/model_plan.rs",
+      "sha256": "3e16ba822f1ec36a1a2ba6cae138ef1e7550918262a0a2edc65cc85ec52d296b"
+    },
+    {
+      "file": "node/src-tauri/src/native_video.rs",
+      "sha256": "e641299430aa4cc866b46908c602c757dae8317c288fecae6e26d3b82e0d3553"
+    },
+    {
+      "file": "node/src-tauri/src/plugins.rs",
+      "sha256": "747ba6f1031f76f2dc96b41d52ff8490e50ca92e7e6ee661f4e092de0a817258"
+    },
+    {
+      "file": "node/src-tauri/src/process_activity.rs",
+      "sha256": "92d0725184ac4207be1c1eded53b3e10aade6b0bddb26331c9c320c614e29fe9"
+    },
+    {
+      "file": "node/src-tauri/src/protocol.rs",
+      "sha256": "75ff50f9f3e72772b5002e8aa053a24a12a8e013b199dd1e3d7d597944b811d9"
+    },
+    {
+      "file": "node/src-tauri/src/resident_video.rs",
+      "sha256": "a97f5c621a5cbff2af7336375feceda1609ab5317d93fe91cc998f27efba2c71"
+    },
+    {
+      "file": "node/src-tauri/src/runtime_binary.rs",
+      "sha256": "3550143e8738b187d45699a838271cbafda8c335b379a77b5c266b844366d755"
+    },
+    {
+      "file": "node/src-tauri/src/video_controls.rs",
+      "sha256": "2e115fa58eb62f1b044e91cd6e82baddba6f902fd6d6bb9a86d29805157af08f"
+    },
+    {
+      "file": "node/src-tauri/src/work_gate.rs",
+      "sha256": "e68e83a766fd8386df2d1c765ef5db6dd23c4fc04601f830a2e0630fe4a06293"
+    }
+  ]
+}

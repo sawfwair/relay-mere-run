@@ -393,6 +393,7 @@ mod tests {
     #[tokio::test]
     async fn reuses_a_process_then_recovers_exit_and_explicit_close() {
         use std::os::unix::fs::PermissionsExt;
+        let isolated_pool = Arc::new(Pool::default());
 
         let root = std::env::temp_dir().join(format!("resident-video-test-{}", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&root).await;
@@ -423,37 +424,45 @@ mod tests {
             .expect("executable fake binary");
         let mapped = request(&draft_request(), MODEL, "film-1", &output, None, None)
             .expect("mapped request");
-        assert!(generate(&binary, &mapped, &output)
-            .await
-            .expect("first job")
-            .is_some());
-        assert!(generate(&binary, &mapped, &output)
-            .await
-            .expect("second job")
-            .is_some());
+        assert!(
+            generate_in_pool(isolated_pool.clone(), &binary, &mapped, &output)
+                .await
+                .expect("first job")
+                .is_some()
+        );
+        assert!(
+            generate_in_pool(isolated_pool.clone(), &binary, &mapped, &output)
+                .await
+                .expect("second job")
+                .is_some()
+        );
         assert_eq!(
             tokio::fs::read_to_string(&log).await.expect("start log"),
             "start\n"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(generate(&binary, &mapped, &output)
-            .await
-            .expect("third job")
-            .is_some());
+        assert!(
+            generate_in_pool(isolated_pool.clone(), &binary, &mapped, &output)
+                .await
+                .expect("third job")
+                .is_some()
+        );
         assert_eq!(
             tokio::fs::read_to_string(&log).await.expect("start log"),
             "start\nstart\n"
         );
-        close().await;
-        assert!(generate(&binary, &mapped, &output)
-            .await
-            .expect("fourth job")
-            .is_some());
+        isolated_pool.close().await;
+        assert!(
+            generate_in_pool(isolated_pool.clone(), &binary, &mapped, &output)
+                .await
+                .expect("fourth job")
+                .is_some()
+        );
         assert_eq!(
             tokio::fs::read_to_string(&log).await.expect("start log"),
             "start\nstart\nstart\n"
         );
-        close().await;
+        isolated_pool.close().await;
         tokio::fs::remove_dir_all(&root).await.expect("cleanup");
     }
 

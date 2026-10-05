@@ -23,6 +23,9 @@ use crate::protocol::{
     TextAdapterCapability, TextAdapterReference,
 };
 
+#[path = "video_controls.rs"]
+mod video_controls;
+
 const DEFAULT_MODEL: &str = "image-klein-9b";
 const DEFAULT_EMBED_MODEL: &str = "text-embed-qwen3-0.6b";
 const DEFAULT_TTS_MODEL: &str = "speech-tts-qwen3-nano";
@@ -1098,6 +1101,9 @@ fn build_video_generate_args(
         req.height.to_string().into(),
         "--quiet".into(),
     ];
+    if req.steps > 0 {
+        args.extend(["--steps".into(), req.steps.to_string().into()]);
+    }
     if let Some(variant) = req.variant.as_deref() {
         args.push("--variant".into());
         args.push(variant.into());
@@ -1158,6 +1164,7 @@ async fn generate_video_with_binary(
     job_id: &str,
     binary: &Path,
 ) -> Result<PathBuf> {
+    video_controls::validate(req)?;
     validate_video_end_image(req)?;
     tokio::fs::create_dir_all(out_dir).await.ok();
     let out_path = out_dir.join(format!("{job_id}.mp4"));
@@ -1194,31 +1201,37 @@ async fn generate_video_with_binary(
         None
     };
 
-    if let Some(request) = crate::resident_video::request(
-        req,
-        &model,
-        job_id,
-        &out_path,
-        input_path.as_deref(),
-        end_path.as_deref(),
-    ) {
-        if crate::resident_video::generate(binary, &request, &out_path)
-            .await?
-            .is_some()
-        {
-            return Ok(out_path);
-        }
-    }
-    crate::resident_video::close().await;
-    let mut cmd = Command::new(binary);
-    cmd.args(build_video_generate_args(
+    let args = build_video_generate_args(
         req,
         &model,
         &out_path,
         input_path.as_deref(),
         end_path.as_deref(),
         audio_path.as_deref(),
-    ));
+    );
+    if !video_controls::one_shot(req) {
+        if let Some(request) = crate::resident_video::request(
+            req,
+            &model,
+            job_id,
+            &out_path,
+            input_path.as_deref(),
+            end_path.as_deref(),
+        ) {
+            if crate::resident_video::generate(binary, &request, &out_path)
+                .await?
+                .is_some()
+            {
+                return Ok(out_path);
+            }
+        }
+    }
+    crate::resident_video::close().await;
+    if req.preflight_required == Some(true) {
+        video_controls::preflight(binary, &args).await?;
+    }
+    let mut cmd = Command::new(binary);
+    cmd.args(args);
 
     run_streaming_with_progress(cmd, None, "video").await?;
     if !out_path.exists() {
@@ -3599,5 +3612,73 @@ echo "$out"
             assert_eq!(got, vec![(1, 4), (2, 4), (3, 4), (4, 4)], "{label}");
         }
         std::env::remove_var("MERERUN_BIN");
+    }
+    #[test]
+    fn video_steps_are_forwarded_exactly() {
+        let req: JobRequest = serde_json::from_value(
+            serde_json::json!({"kind":"video","prompt":"test","width":512,"height":320,"steps":8}),
+        )
+        .unwrap();
+        let args = build_video_generate_args(
+            &req,
+            "video-test",
+            Path::new("/tmp/test.mp4"),
+            None,
+            None,
+            None,
+        );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--steps" && pair[1] == "8"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn video_required_preflight_and_policy_fail_closed_before_generation() {
+        use std::os::unix::fs::PermissionsExt;
+        for (index, extra) in [
+            serde_json::json!({"preflight_required":true}),
+            serde_json::json!({"memory_policy":"conservative"}),
+            serde_json::json!({"max_oom_retries":1}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dir = std::env::temp_dir()
+                .join(format!("video-control-red-{}-{index}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let binary = dir.join("fake-runtime");
+            std::fs::write(
+                &binary,
+                r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = '--preflight' ]; then
+    echo '{"schema_version":1,"command":["video","generate"],"mode":"preflight","status":"blocked"}'
+    exit 0
+  fi
+done
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '--output' ]; then shift; touch "$1"; fi
+  shift
+done
+"#,
+            )
+            .unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut value = serde_json::json!({"kind":"video","prompt":"test","width":512,"height":320,"model":"video-test","steps":8});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let req = serde_json::from_value(value).unwrap();
+            let outcome = generate_video_with_binary(&req, &dir, "job", &binary).await;
+            let produced = dir.join("job.mp4").exists();
+            std::fs::remove_dir_all(&dir).unwrap();
+            assert!(
+                outcome.is_err(),
+                "case {index} ran without supported controls"
+            );
+            assert!(!produced, "case {index} generated despite rejection");
+        }
     }
 }

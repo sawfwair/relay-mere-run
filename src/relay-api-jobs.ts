@@ -34,6 +34,10 @@ function canUseRequiredDevice(ctx: RelayContext, deviceId: string | undefined, u
   return Array.from(ctx.getConnectedAgents().values()).some((agent) => agent.info.device_id === deviceId);
 }
 
+function hasExplicitVideoControls(request: SubmitJobRequest): boolean {
+  return inferJobKind(request) === 'video' && (request.steps !== undefined || request.preflight_required !== undefined || request.max_oom_retries !== undefined);
+}
+
 export async function handleSubmitJob(
   ctx: RelayContext,
   request: SubmitJobRequest & { client_id: string; relay_origin?: string },
@@ -54,7 +58,11 @@ export async function handleSubmitJob(
   }
   const fleetSettings = await getFleetSettings(ctx);
 
+
   const jobRequest: JobRequest = {
+    video_controls_version: hasExplicitVideoControls(request) ? 1 : undefined,
+    preflight_required: request.preflight_required,
+    max_oom_retries: request.max_oom_retries,
     kind,
     prompt: request.prompt,
     negative_prompt: request.negative_prompt ?? null,

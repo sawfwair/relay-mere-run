@@ -47,7 +47,9 @@ export async function handleStatus(ctx: RelayContext): Promise<Response> {
 
   const response: StatusResponse = {
     agents,
-    placement_constraints: ['required_device_id'],    queue_depth: countQueuedWork(ctx),
+    video_request_controls: 1,
+    placement_constraints: ['required_device_id'],
+    queue_depth: countQueuedWork(ctx),
   };
   return Response.json(response);
 }

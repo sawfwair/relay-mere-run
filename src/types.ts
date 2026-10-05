@@ -27,6 +27,7 @@ export interface Env {
 
 // Agent capabilities reported on connect
 export interface AgentCapabilities {
+  video_request_controls?: 1;
   hosting?: { kind: 'workstation' | 'runpod' | 'other' | 'unknown'; source: 'owner-declared'; label?: string };
   models: string[];
   max_resolution: number;
@@ -319,6 +320,10 @@ export interface AgentInfo {
 
 // Generation request parameters
 export interface JobRequest {
+  video_controls_version?: 1;
+  memory_policy?: string;
+  preflight_required?: boolean;
+  max_oom_retries?: 0;
   kind?: 'image' | 'music' | 'video';
   prompt: string;
   negative_prompt: string | null;
@@ -976,6 +981,9 @@ export type RelayMessage =
 
 // HTTP API request/response types
 export interface SubmitJobRequest {
+  memory_policy?: string;
+  preflight_required?: boolean;
+  max_oom_retries?: 0;
   required_device_id?: string;
   kind?: 'image' | 'music' | 'video';
   prompt: string;
@@ -1015,6 +1023,7 @@ export type SubmitVideoRequest = SubmitJobRequest;
 export type SubmitMusicRequest = SubmitJobRequest;
 
 export interface StatusResponse {
+  video_request_controls?: 1;
   placement_constraints?: string[];
   agents: Array<{
     agent_id: string;
