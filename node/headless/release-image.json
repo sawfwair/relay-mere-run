@@ -1,12 +1,11 @@
 {
   "schemaVersion": 1,
-  "image": "registry.cloudflare.com/d49787aa3908b52ac1bf58ba6d6375f1/animatic-headless-node@sha256:458e435c539cec768361fab6c8f4707e4ced46eb45648aaf67086ef8b26da440",
+  "image": "registry.cloudflare.com/d49787aa3908b52ac1bf58ba6d6375f1/animatic-headless-node@sha256:3aa4e9a0a703867687459b2369b82e0c8421bb268a7d87f269ab64888883a401",
   "platform": "linux/amd64",
-  "runtimeSourceCommit": "4c3c3245875df1ec106b1f4e84ff30c50d201965",
-  "daemonSha256": "778f0e3bce25c884405b3161def6a8063ce92d5e48d410e41df5b2e9268317d7",
+  "runtimeSourceCommit": "ec72d375b615a981985dad16a5c01b2b89443727",
+  "daemonSha256": "bebcaff3eb1ab09a9a793ef7c307054535b85f0e0d0d2473b1fb8f8641135844",
   "runtimeVersion": "0.60.1",
   "runtimeArchiveSha256": "c465064323a63ddb06b6455f506f55bb6c7b629839105d329b362621807623f6",
-  "publishedAt": "2026-10-04T16:47:31.350392+00:00",
-  "sourceCiRun": "https://github.com/sawfwair/relay-mere-run/actions/runs/37218005413",
-  "qualificationBoundary": "Current image: Linux cross-build and CPU bootstrap/permission/unenrolled-health checks passed. Native suites134 headless/139 desktop pass with6 live tests ignored each. Image and video cancellation now terminate generation process groups and discard interrupted resident sessions; fake CLI tests prove the process boundary, not real GPU video inference. Prior A40 inference and provider restart receipts use predecessor image digests; no account-approved GPU/Relay/Animatic inference has been run with this release image."
+  "publishedAt": "2026-10-05T04:14:00.931401+00:00",
+  "qualificationBoundary": "CPU-only qualification: 141 headless Rust tests pass, 6 live tests ignored; desktop cargo check and Clippy pass; 23 controller/bootstrap tests pass. Container help and unenrolled health/startup rejection pass. CUDA runtime cannot load on this CPU Docker host because libcuda.so.1 is unavailable. No GPU inference, memory admission, or approved account video qualification was performed with this image. Exact steps, required request preflight, and zero Node process retries are implemented; Relay lost-lease recovery is separate."
 }
