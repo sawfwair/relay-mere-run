@@ -79,6 +79,8 @@ pub fn declared_hosting_from_env() -> Result<Option<DeclaredHosting>, String> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_request_controls: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hosting: Option<DeclaredHosting>,
     pub models: Vec<String>,
     pub max_resolution: u32,
@@ -596,6 +598,14 @@ fn default_job_kind() -> JobKind {
 /// Generation request parameters (relay `JobRequest`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct JobRequest {
+    #[serde(default)]
+    pub video_controls_version: Option<u8>,
+    #[serde(default)]
+    pub memory_policy: Option<String>,
+    #[serde(default)]
+    pub preflight_required: Option<bool>,
+    #[serde(default)]
+    pub max_oom_retries: Option<u32>,
     #[serde(default = "default_job_kind")]
     pub kind: JobKind,
     pub prompt: String,
@@ -1046,6 +1056,7 @@ mod inventory_tests {
     fn encodes_inventory_update() {
         let message = AgentMessage::InventoryUpdate {
             capabilities: AgentCapabilities {
+                video_request_controls: Some(1),
                 hosting: None,
                 models: vec!["image-krea2-raw".to_string()],
                 max_resolution: 2048,

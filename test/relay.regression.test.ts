@@ -56,7 +56,7 @@ describe('relay regressions', () => {
     const userId = newUserId('video-controls');
     const { relay, ws } = await connectAgent(
       userId,
-      capabilitiesWithModels(['video-ltx25-distilled-bf16'])
+      { ...capabilitiesWithModels(['video-ltx25-distilled-bf16']), video_request_controls: 1 }
     );
     try {
       const controls = {

@@ -79,6 +79,7 @@ export function supportsJob(info: AgentInfo, job: Job): boolean {
     return supportsRequestedModelOrMarker(info, job.request.model, 'music', 'music-');
   }
   if (kind === 'video') {
+    if (job.request.video_controls_version === 1 && info.capabilities.video_request_controls !== 1) return false;
     return supportsRequestedModelOrMarker(info, job.request.model, 'video', 'video-');
   }
 

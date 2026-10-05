@@ -70,6 +70,7 @@ const pluginCapabilitySchema = z.object({
 }).passthrough();
 
 export const agentCapabilitiesSchema = z.object({
+  video_request_controls: z.literal(1).optional(),
   hosting: z.object({
     kind: z.enum(['workstation', 'runpod', 'other', 'unknown']),
     source: z.literal('owner-declared'),

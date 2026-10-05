@@ -170,3 +170,26 @@ missing or wrong-scope grant and checks live placement support before rental.
 No account run has occurred while approval remains absent. The CLI prints the
 broker's actual grant expiry; the earlier ten-minute approval estimate was not
 a measured server lifetime.
+
+## Video request controls, version 1
+
+The Node advertises `capabilities.video_request_controls: 1`. A matching Relay
+advertises `video_request_controls: 1` in status and requires that Node capability
+for jobs with explicit steps, preflight, or process retry controls, including
+untargeted jobs and lease recovery. Older Nodes are ineligible for those jobs.
+
+This version forwards exact `steps` to the video CLI and supports
+`preflight_required: true` plus `max_oom_retries: 0`. Controlled jobs use one-shot
+execution. Before generation, required preflight runs the identical arguments
+with `--preflight --json`, bounded to 120 seconds and a 1 MiB report. Malformed,
+blocked, or warning reports stop before generation. Cancellation terminates the
+preflight process group and suppresses generation. After a passing preflight,
+the Node starts at most one generation process; a process OOM does not trigger a
+Node retry. Relay lease recovery remains a separate policy and can reassign work
+when a lease is lost.
+
+The pinned mere.run 0.60.1 preflight validates request/model/input readiness; it
+is not GPU memory admission. Every explicit `memory_policy` and every nonzero
+`max_oom_retries` is rejected. Do not substitute an invented auto/conservative
+policy or infer GPU qualification from CPU fake-process tests. Matching new
+Relay and Node releases are required before using this contract in production.
