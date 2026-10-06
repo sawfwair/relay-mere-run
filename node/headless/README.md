@@ -194,10 +194,15 @@ is not GPU memory admission. Every explicit `memory_policy` and every nonzero
 policy or infer GPU qualification from CPU fake-process tests. Matching new
 Relay and Node releases are required before using this contract in production.
 
-The current [release image](release-image.json) is the CPU-qualified video-controls
-build from source `ec72d375b615a981985dad16a5c01b2b89443727`. Its immutable image,
-daemon checksum, pinned runtime, and qualification boundaries are recorded there.
-[Build inputs](video-controls-build-inputs.json) match that source commit, and
-[CPU checks](video-controls-qualification.json) retain the release evidence.
-This supersedes the earlier pin; historical A40 inference belongs to predecessor
-images and does not qualify GPU video inference on the current image.
+The current [release image](release-image.json) forwards explicit model-license
+acceptance to both preflight and download. Default acceptance remains false.
+[Package checks](license-preflight-qualification.json) record source
+`64df9ba752224c92322428105104d07713305acb`, the immutable image, checksums and
+CPU validation. No license was accepted or model downloaded during these checks.
+
+The predecessor image passed live A40 image generation, Relay cancellation,
+Animatic selection and a saved still-hold cut export. Its video model plan stopped
+at preflight; model-generated motion remains unqualified. The new image still
+requires live GPU qualification. Live lease recovery and GPU memory admission
+remain separate gates. Historical [video-control build inputs](video-controls-build-inputs.json)
+and [CPU checks](video-controls-qualification.json) retain their original scope.

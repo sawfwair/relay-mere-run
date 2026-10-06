@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "64df9ba752224c92322428105104d07713305acb",
+  "image": "registry.cloudflare.com/d49787aa3908b52ac1bf58ba6d6375f1/animatic-headless-node@sha256:609d26a32ce0e532a67d100b0375f3baeca89bd12ed2501a21a31c100972f3a4",
+  "daemonSha256": "676a2d37d722f5a054cb07ccae39c811b3f9936482859d2dafbbbe032c3847a4",
+  "runtimeArchiveSha256": "c465064323a63ddb06b6455f506f55bb6c7b629839105d329b362621807623f6",
+  "platform": "linux/amd64",
+  "builtAt": "2026-10-06T12:21:29.991349+00:00",
+  "sourceFiles": {
+    "node/src-tauri/src/model_plan.rs": "a8934140e1a684ec355c2f6b44b01e4b61c0ba2f86a3f7aae8e3d2601c9e8207",
+    "node/headless/Dockerfile": "cb820a04c7b93147b1d80549718d13d1c0bce78c7427c738036c0c0391fd1981",
+    "node/headless/Cargo.lock": "e9bd51b032d736d793e0078c244e10c89585e0a27b9d65431479245a761e2a21"
+  },
+  "tests": {
+    "headlessPassed": 143,
+    "headlessLiveIgnored": 6,
+    "clippyWarningsDenied": true,
+    "desktopCargoCheck": true,
+    "containerHelp": true,
+    "containerUnenrolledRunRejected": true,
+    "containerRunUserId": 10001
+  },
+  "licenseAccepted": false,
+  "modelDownloaded": false,
+  "gpuInferenceQualified": false,
+  "predecessorImage": "registry.cloudflare.com/d49787aa3908b52ac1bf58ba6d6375f1/animatic-headless-node@sha256:3aa4e9a0a703867687459b2369b82e0c8421bb268a7d87f269ab64888883a401"
+}
