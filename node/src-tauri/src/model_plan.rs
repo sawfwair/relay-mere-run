@@ -67,6 +67,19 @@ fn preflight_installed(stdout: &[u8], model_id: &str) -> bool {
         })
 }
 
+fn preflight_command(
+    binary: &std::path::Path,
+    model_id: &str,
+    accept_model_licenses: bool,
+) -> Command {
+    let mut command = Command::new(binary);
+    command.args(["model", "pull", model_id, "--preflight", "--json"]);
+    if accept_model_licenses {
+        command.arg("--accept-model-license");
+    }
+    command
+}
+
 async fn run_pull(
     model_id: &str,
     accept_model_licenses: bool,
@@ -133,8 +146,7 @@ pub async fn execute(
         }
 
         send_progress(&events, Some(model_id), "preflighting", None);
-        let preflight = Command::new(&binary)
-            .args(["model", "pull", model_id, "--preflight", "--json"])
+        let preflight = preflight_command(&binary, model_id, accept_model_licenses)
             .output()
             .await;
         let preflight = match preflight {
@@ -217,6 +229,55 @@ pub async fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_license_consent_is_forwarded_to_preflight() {
+        let command = preflight_command(
+            std::path::Path::new("test-runtime"),
+            "video-ltx25-distilled-bf16",
+            true,
+        );
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            [
+                "model",
+                "pull",
+                "video-ltx25-distilled-bf16",
+                "--preflight",
+                "--json",
+                "--accept-model-license"
+            ]
+        );
+    }
+
+    #[test]
+    fn preflight_without_explicit_consent_does_not_accept_licenses() {
+        let command = preflight_command(
+            std::path::Path::new("test-runtime"),
+            "video-ltx25-distilled-bf16",
+            false,
+        );
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            [
+                "model",
+                "pull",
+                "video-ltx25-distilled-bf16",
+                "--preflight",
+                "--json"
+            ]
+        );
+    }
 
     #[test]
     fn model_ids_are_strict_cli_values() {
