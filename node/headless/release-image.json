@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "image": "registry.cloudflare.com/d49787aa3908b52ac1bf58ba6d6375f1/animatic-headless-node@sha256:3aa4e9a0a703867687459b2369b82e0c8421bb268a7d87f269ab64888883a401",
+  "image": "registry.cloudflare.com/d49787aa3908b52ac1bf58ba6d6375f1/animatic-headless-node@sha256:609d26a32ce0e532a67d100b0375f3baeca89bd12ed2501a21a31c100972f3a4",
   "platform": "linux/amd64",
-  "runtimeSourceCommit": "ec72d375b615a981985dad16a5c01b2b89443727",
-  "daemonSha256": "bebcaff3eb1ab09a9a793ef7c307054535b85f0e0d0d2473b1fb8f8641135844",
+  "runtimeSourceCommit": "64df9ba752224c92322428105104d07713305acb",
+  "daemonSha256": "676a2d37d722f5a054cb07ccae39c811b3f9936482859d2dafbbbe032c3847a4",
   "runtimeVersion": "0.60.1",
   "runtimeArchiveSha256": "c465064323a63ddb06b6455f506f55bb6c7b629839105d329b362621807623f6",
-  "publishedAt": "2026-10-05T04:14:00.931401+00:00",
-  "qualificationBoundary": "CPU-only qualification: 141 headless Rust tests pass, 6 live tests ignored; desktop cargo check and Clippy pass; 23 controller/bootstrap tests pass. Container help and unenrolled health/startup rejection pass. CUDA runtime cannot load on this CPU Docker host because libcuda.so.1 is unavailable. No GPU inference, memory admission, or approved account video qualification was performed with this image. Exact steps, required request preflight, and zero Node process retries are implemented; Relay lost-lease recovery is separate."
+  "publishedAt": "2026-10-06T12:21:29.991349+00:00",
+  "qualificationBoundary": "CPU/package qualification only: 143 headless Rust tests pass, 6 live tests ignored; desktop cargo check and Clippy pass. Linux amd64 package help and unenrolled startup rejection pass. Explicit model-license consent reaches preflight and pull; default remains false. No license accepted or model downloaded during these checks. Predecessor image passed live A40 image delivery, cancellation and Animatic still-hold export; this new image has not run GPU inference. Motion-video delivery, live lease recovery and GPU memory admission remain unqualified."
 }

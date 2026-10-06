@@ -102,7 +102,7 @@ def log_entries(stream, max_frame_bytes=1024 * 1024):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--gpu', choices=['NVIDIA A40', 'NVIDIA RTX A6000'], default='NVIDIA A40',
+    parser.add_argument('--gpu', choices=['NVIDIA A40', 'NVIDIA RTX A6000', 'NVIDIA L40'], default='NVIDIA A40',
                         help='Explicit GPU selection; unavailable capacity is never retried on another GPU')
     parser.add_argument('--image', help='Immutable override; defaults to the reviewed release-image.json pin')
     parser.add_argument('--registry-password-file', required=True)
