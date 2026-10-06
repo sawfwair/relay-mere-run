@@ -1,6 +1,7 @@
 import importlib.util
 import base64
 import io
+import itertools
 import json
 import pathlib
 import tempfile
@@ -52,7 +53,7 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(entries[-1]['line'], 'NODE_QUALIFICATION_EXIT=0')
         self.assertTrue(entries[0]['truncated'])
 
-    def run_scenario(self, ambiguous, restart=False, marker_matches=True, account=False, placement=True, hook_success=True):
+    def run_scenario(self, ambiguous, restart=False, marker_matches=True, account=False, placement=True, hook_success=True, gpu=None, capacity_rejected=False, reconciliation_fails=False):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / 'env').write_text('RUNPOD_API_KEY=test-api-secret')
@@ -76,7 +77,9 @@ class QualificationTests(unittest.TestCase):
                                      'agents': [{'device_name': owned_name, 'device_id': 'owned-node'}] if owned_name else []})
                 if request.full_url.endswith('/graphql'):
                     if 'gpuTypes' in body['query']:
-                        return Response({'data': {'gpuTypes': [{'id': 'NVIDIA A40', 'securePrice': 0.49}]}})
+                        return Response({'data': {'gpuTypes': [{'id': 'NVIDIA A40', 'securePrice': 0.49}, {'id': 'NVIDIA RTX A6000', 'securePrice': 0.53}]}})
+                    if capacity_rejected:
+                        return Response({'errors': [{'message': 'No capacity available'}], 'data': {'podFindAndDeployOnDemand': None}})
                     pod_created = True
                     owned_name = body['variables']['input']['name']
                     if ambiguous:
@@ -98,6 +101,8 @@ class QualificationTests(unittest.TestCase):
                     deleted = True
                     return Response(None)
                 if request.full_url.endswith('/pods'):
+                    if reconciliation_fails:
+                        raise TimeoutError('reconciliation unavailable')
                     pods = [{'id': 'unrelated', 'name': 'existing-work'}]
                     if pod_created and not deleted:
                         pods.append({'id': 'owned-pod', 'name': owned_name})
@@ -111,6 +116,8 @@ class QualificationTests(unittest.TestCase):
             output = io.StringIO()
             argv = ['qualify', '--image', 'example/image@sha256:' + 'a' * 64, '--registry-password-file', str(root / 'password'),
                     '--registry-username', 'account', '--env-file', str(root / 'env'), '--receipt-dir', str(root / 'receipt'), '--execute']
+            if gpu:
+                argv += ['--gpu', gpu]
             if restart:
                 argv.append('--restart-probe')
             if account:
@@ -129,12 +136,24 @@ class QualificationTests(unittest.TestCase):
                 def open(self, request, timeout=None):
                     return respond(request, timeout)
 
-            with patch('time.sleep'), patch('sys.argv', argv), patch('urllib.request.urlopen', side_effect=respond), patch('urllib.request.build_opener', return_value=Opener()), patch('subprocess.Popen', Hook), patch('sys.stdout', output):
+            clock = itertools.count(time.time(), 10 if capacity_rejected else 0.01)
+            with patch('time.time', side_effect=lambda: next(clock)), patch('time.sleep'), patch('sys.argv', argv), patch('urllib.request.urlopen', side_effect=respond), patch('urllib.request.build_opener', return_value=Opener()), patch('subprocess.Popen', Hook), patch('sys.stdout', output):
                 result = qualifier.main()
             receipt = json.loads((root / 'receipt/receipt.json').read_text())
             if account and not placement:
                 self.assertFalse(any(method == 'POST' for _, method, _ in requests))
                 self.assertEqual(result, 1)
+                return
+            if capacity_rejected:
+                if reconciliation_fails:
+                    self.assertGreater(receipt['estimatedComputeUSD'], 0)
+                    self.assertTrue(receipt['podReconciliationFailed'])
+                else:
+                    self.assertEqual(receipt['estimatedComputeUSD'], 0)
+                self.assertNotIn('podId', receipt)
+                self.assertTrue(receipt['registryAuthDeleted'])
+                self.assertEqual(result, 1)
+                self.assertEqual(sum(bool(body and body.get('variables')) for _, _, body in requests), 1)
                 return
             self.assertTrue(receipt['podDeleted'])
             self.assertTrue(receipt['registryAuthDeleted'])
@@ -143,6 +162,14 @@ class QualificationTests(unittest.TestCase):
             config = mutations[0][2]['variables']['input']
             self.assertIn('terminateAfter', config)
             self.assertEqual(config['gpuCount'], 1)
+            selected_gpu = gpu or 'NVIDIA A40'
+            self.assertEqual(config['gpuTypeId'], selected_gpu)
+            self.assertEqual(receipt['gpu'], selected_gpu)
+            self.assertEqual(receipt['quotedGPUCostPerHourUSD'], 0.53 if gpu else 0.49)
+            self.assertEqual(config['minMemoryInGb'], 48)
+            self.assertEqual(config['allowedCudaVersions'], ['12.9', '13.0'])
+            hosting = next(item['value'] for item in config['env'] if item['key'] == 'MERERUN_NODE_HOSTING_LABEL')
+            self.assertIn(selected_gpu.removeprefix('NVIDIA '), hosting)
             self.assertFalse(any('/unrelated' in r[0] for r in requests))
             for secret in ['test-api-secret', 'test-registry-secret', node_access, 'test-refresh-secret']:
                 self.assertNotIn(secret, output.getvalue())
@@ -155,6 +182,25 @@ class QualificationTests(unittest.TestCase):
             if restart:
                 self.assertEqual(receipt['privateStateRestored'], marker_matches)
                 self.assertEqual(sum(url.endswith('/restart') for url, _, _ in requests), 1)
+
+    def test_explicit_a6000_propagates_without_automatic_fallback(self):
+        self.run_scenario(False, gpu='NVIDIA RTX A6000')
+
+    def test_unknown_gpu_rejected_before_credentials_or_api(self):
+        argv = ['qualify', '--gpu', 'NVIDIA H100', '--registry-password-file', 'unused',
+                '--registry-username', 'unused', '--receipt-dir', 'unused', '--execute']
+        with patch('sys.argv', argv), patch('sys.stderr', io.StringIO()), patch.object(qualifier, 'credential') as credential, patch('urllib.request.urlopen') as api:
+            with self.assertRaises(SystemExit) as error:
+                qualifier.main()
+        self.assertEqual(error.exception.code, 2)
+        credential.assert_not_called()
+        api.assert_not_called()
+
+    def test_rejected_capacity_does_not_estimate_compute_for_absent_pod(self):
+        self.run_scenario(False, capacity_rejected=True)
+
+    def test_failed_reconciliation_does_not_claim_zero_compute(self):
+        self.run_scenario(False, capacity_rejected=True, reconciliation_fails=True)
 
     def test_changed_private_state_marker_fails_and_still_removes_resources(self):
         self.run_scenario(False, restart=True, marker_matches=False)

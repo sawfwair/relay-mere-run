@@ -22,6 +22,10 @@ import urllib.request
 import uuid
 
 
+class PodCreationRejected(RuntimeError):
+    """Provider explicitly rejected creation without returning a Pod."""
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, msg, headers, newurl):
         raise RuntimeError('Redirect rejected for credential-bearing API request')
@@ -98,6 +102,8 @@ def log_entries(stream, max_frame_bytes=1024 * 1024):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--gpu', choices=['NVIDIA A40', 'NVIDIA RTX A6000'], default='NVIDIA A40',
+                        help='Explicit GPU selection; unavailable capacity is never retried on another GPU')
     parser.add_argument('--image', help='Immutable override; defaults to the reviewed release-image.json pin')
     parser.add_argument('--registry-password-file', required=True)
     parser.add_argument('--registry-username', required=True)
@@ -136,12 +142,14 @@ def main():
     root.mkdir(parents=True, exist_ok=False, mode=0o700)
     name = 'animatic-node-qualification-' + uuid.uuid4().hex[:12]
     receipt = {'name': name, 'image': args.image, 'purpose': 'Private state/restart only' if args.state_only else 'GPU runtime preflight only',
-               'relayJobQualified': False, 'gpu': 'NVIDIA A40', 'gpuCount': 1,
+               'relayJobQualified': False, 'gpu': args.gpu, 'gpuCount': 1,
                'maxDurationSeconds': 3600, 'budgetUSD': 20, 'status': 'starting'}
     if node_auth:
         receipt['purpose'] = 'Dedicated approved Node account qualification'
     registry_id = pod_id = None
     started = None
+    pod_creation_rejected = False
+    known_no_pod = False
     hook_process = None
     hook_log = None
 
@@ -160,7 +168,10 @@ def main():
         result = api('https://api.runpod.io/graphql', {'query': query, 'variables': variables or {}})
         if result.get('errors'):
             # API errors can echo inputs. Preserve only message types, never bodies.
-            raise RuntimeError(redact('; '.join(str(e.get('message', 'GraphQL error')) for e in result['errors'])))
+            message = redact('; '.join(str(e.get('message', 'GraphQL error')) for e in result['errors']))
+            if 'podFindAndDeployOnDemand' in query and not (result.get('data') or {}).get('podFindAndDeployOnDemand'):
+                raise PodCreationRejected(message)
+            raise RuntimeError(message)
         return result['data']
 
     def relay_status():
@@ -197,7 +208,7 @@ def main():
             'minMemoryInGb': 48, 'minVcpuCount': 4, 'terminateAfter': termination,
             'env': [{'key': 'MERERUN_NODE_NAME', 'value': name},
                     {'key': 'MERERUN_NODE_HOSTING_KIND', 'value': 'runpod'},
-                    {'key': 'MERERUN_NODE_HOSTING_LABEL', 'value': 'RunPod A40 qualification'}]}
+                    {'key': 'MERERUN_NODE_HOSTING_LABEL', 'value': 'RunPod ' + args.gpu.removeprefix('NVIDIA ') + ' qualification'}]}
         if node_auth:
             config['dockerArgs'] = json.dumps({'cmd': ['run', '--state-dir', '/home/node/.local/share/mere-run-node'],
                 'entrypoint': ['/usr/local/bin/node-container-entrypoint']})
@@ -301,6 +312,7 @@ def main():
     except KeyboardInterrupt:
         receipt['status'] = 'interrupted'
     except Exception as error:
+        pod_creation_rejected = isinstance(error, PodCreationRejected)
         receipt['status'] = 'failed'
         receipt['errorType'] = type(error).__name__
         receipt['errorMessage'] = redact(str(error))
@@ -323,6 +335,7 @@ def main():
             try:
                 pods = api('https://rest.runpod.io/v1/pods')
                 owned = [p for p in pods if p.get('name') == name]
+                known_no_pod = not owned and pod_creation_rejected
                 if len(owned) == 1:
                     pod_id = owned[0]['id']
                     receipt['podId'] = pod_id
@@ -361,8 +374,12 @@ def main():
                 receipt['registryAuthDeleted'] = False
         if started:
             receipt['elapsedSeconds'] = round(time.time() - started, 2)
-            receipt['estimatedComputeUSD'] = round(receipt.get('costPerHourUSD', 1.1) * receipt['elapsedSeconds'] / 3600, 4)
-            receipt['billingNote'] = 'Elapsed-rate estimate; final billing/storage require provider billing reconciliation.'
+            if known_no_pod:
+                receipt['estimatedComputeUSD'] = 0
+                receipt['billingNote'] = 'Creation was rejected and no owned Pod was found; no compute allocated.'
+            else:
+                receipt['estimatedComputeUSD'] = round(receipt.get('costPerHourUSD', 1.1) * receipt['elapsedSeconds'] / 3600, 4)
+                receipt['billingNote'] = 'Elapsed-rate estimate; final billing/storage require provider billing reconciliation.'
         save()
         print(json.dumps(receipt), flush=True)
     return 0 if receipt['status'] == 'passed' and receipt.get('podDeleted') else 1
