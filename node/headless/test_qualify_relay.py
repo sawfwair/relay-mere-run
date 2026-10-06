@@ -21,8 +21,8 @@ class Relay:
         self.calls = []
         self.node = {'device_id': 'owned', 'device_name': 'animatic-node-qualification-owned',
             'agent_id': 'agent-owned', 'status': 'online', 'current_job_id': None,
-            'capacity': {'lease_protocol': True}, 'runtime': {'installed_models': [qualifier.MODEL]},
-            'capabilities': {'hosting': {'kind': 'runpod'}}, 'policy': {'revoked': False}}
+            'capacity': {'lease_protocol': True}, 'runtime': {'installed_models': [qualifier.MODEL], 'inventory_status': 'reported'},
+            'capabilities': {'hosting': {'kind': 'runpod'}, 'models': [qualifier.MODEL]}, 'policy': {'revoked': False}}
         self.constraints = ['required_device_id']
         self.jobs = {}
         self.wrong_owner = False
@@ -105,6 +105,7 @@ class RelayQualificationTests(unittest.TestCase):
                     current[0] = 'refreshed-after-install'
                     value = {}
                 elif path == '/fleet/model-plans/install':
+                    relay.node['runtime']['installed_models'] = [qualifier.MODEL]
                     value = {'state': 'finished'}
                 else:
                     value = relay(method, path, body)
@@ -156,6 +157,118 @@ class RelayQualificationTests(unittest.TestCase):
             api('POST', '/generate', {})
         error.exception.close()
         self.assertEqual(calls, ['POST'])
+
+    def test_submission_http_failure_retains_safe_diagnostic_without_replay(self):
+        for status in [403, 503, 599]:
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                relay = Relay()
+                sent = []
+                class Opener:
+                    def open(self, request, timeout):
+                        route = request.full_url.removeprefix('https://relay.mere.run/api')
+                        sent.append((request.get_method(), route))
+                        if route == '/generate':
+                            raise urllib.error.HTTPError('https://private.test/?token=secret', status,
+                                'raw secret reason', {'secret': 'private'}, io.BytesIO(json.dumps({
+                                    'code': 'NO_COMPATIBLE_AGENTS', 'error': 'Bearer private-token',
+                                    'url': 'https://private.test/?signature=private'
+                                }).encode()))
+                        return io.BytesIO(json.dumps(relay(request.get_method(), route)).encode())
+                receipt = {'nonce': 'test'}
+                try:
+                    qualifier.run(qualifier.make_api('private-bearer', Opener()), 'owned',
+                        'animatic-node-qualification-owned', 'owner', pathlib.Path(directory),
+                        receipt, lambda: None, sleep=lambda _: None, decode=lambda _: None)
+                except Exception as error:
+                    qualifier.record_failure(receipt, error)
+                self.assertEqual(receipt['httpFailure'], {'status': status, 'method': 'POST',
+                    'path': '/generate', 'code': 'NO_COMPATIBLE_AGENTS'})
+                self.assertEqual(receipt['submissionInFlight'], 'generation')
+                self.assertEqual(sent.count(('POST', '/generate')), 1)
+                self.assertNotIn('private', json.dumps(receipt))
+                self.assertNotIn('secret', json.dumps(receipt))
+
+    def test_http_diagnostic_omits_unknown_codes_raw_paths_and_oversized_bodies(self):
+        bodies = [b'<html>Bearer secret</html>', b'[]', b'{"code":"secret"}',
+            b'{"code":["NO_AGENTS"]}', b'{"code":"NO_AGENTS","padding":"' + b'x' * 5000 + b'"}']
+        for body in bodies:
+            with self.subTest(body_size=len(body)):
+                class Opener:
+                    def open(self, request, timeout):
+                        raise urllib.error.HTTPError(request.full_url, 502, 'secret', {}, io.BytesIO(body))
+                receipt = {}
+                try:
+                    qualifier.make_api('secret', Opener())('GET', '/job/private-id?token=secret')
+                except Exception as error:
+                    qualifier.record_failure(receipt, error)
+                self.assertEqual(receipt['httpFailure'], {'status': 502, 'method': 'GET', 'path': '/job/:id'})
+                self.assertNotIn('secret', json.dumps(receipt))
+                self.assertNotIn('private-id', json.dumps(receipt))
+
+    def test_model_plan_completion_waits_for_same_agent_advertised_inventory(self):
+        relay = Relay()
+        relay.node['runtime']['installed_models'] = []
+        relay.node['runtime']['inventory_status'] = 'empty'
+        relay.node['capabilities']['models'] = []
+        applied = False
+        reads = 0
+        def api(method, path, body=None):
+            nonlocal applied, reads
+            if path == '/fleet/model-plans' and method == 'POST':
+                return {'plan_id': 'install'}
+            if path == '/fleet/model-plans/install/apply':
+                applied = True
+                return {}
+            if path == '/fleet/model-plans/install':
+                return {'state': 'finished'}
+            if path == '/fleet' and applied:
+                reads += 1
+                if reads >= 2:
+                    relay.node['runtime'] = {'inventory_status': 'reported', 'installed_models': [qualifier.MODEL]}
+                    relay.node['capabilities']['models'] = [qualifier.MODEL]
+            if path == '/generate':
+                self.assertGreaterEqual(reads, 2, 'generate sent before model capability heartbeat')
+            return relay(method, path, body)
+        self.assertEqual(self.exercise(api)['status'], 'passed')
+
+    def test_failed_inventory_and_changed_agent_never_submit(self):
+        for failure in ['failed', 'changed-agent', 'missing-capability']:
+            with self.subTest(failure=failure):
+                relay = Relay()
+                reads = 0
+                def api(method, path, body=None):
+                    nonlocal reads
+                    if path == '/fleet':
+                        reads += 1
+                        if reads > 1:
+                            if failure == 'changed-agent':
+                                relay.node['agent_id'] = 'replacement-agent'
+                            elif failure == 'failed':
+                                relay.node['runtime']['inventory_status'] = 'failed'
+                            else:
+                                relay.node['capabilities']['models'] = []
+                    return relay(method, path, body)
+                with self.assertRaisesRegex(qualifier.QualificationError, 'inventory|agent|capability'):
+                    self.exercise(api)
+                self.assertFalse(any(path == '/generate' for _, path, _ in relay.calls))
+
+    def test_readiness_timeout_records_only_bounded_safe_state(self):
+        relay = Relay()
+        relay.node['runtime']['inventory_status'] = 'unavailable'
+        relay.node['runtime']['error'] = 'secret raw failure'
+        relay.node['capabilities']['models'] = ['private-unrelated-model']
+        receipt = {'nonce': 'test'}
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(qualifier.QualificationError, 'readiness deadline'):
+                qualifier.run(relay, 'owned', 'animatic-node-qualification-owned', 'owner',
+                    pathlib.Path(directory), receipt, lambda: None, sleep=lambda _: None, polls=2,
+                    decode=lambda _: None)
+        self.assertEqual(receipt['lastModelReadiness'], {'poll': 2, 'inventoryStatus': 'unavailable',
+            'installedModelPresent': True, 'fleetCapabilityPresent': False,
+            'connectedCapabilityPresent': False, 'sameAgent': True})
+        self.assertNotIn('secret', json.dumps(receipt))
+        self.assertNotIn('private-unrelated-model', json.dumps(receipt))
+        self.assertFalse(any(path == '/generate' for _, path, _ in relay.calls))
 
     def test_old_relay_cannot_silently_fall_back(self):
         relay = Relay()

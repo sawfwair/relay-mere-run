@@ -32,6 +32,49 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise QualificationError('Redirect rejected; account bearer stays on Relay origin')
 
 
+HTTP_ERROR_CODES = frozenset({
+    'TARGET_NODE_UNAVAILABLE', 'NO_AGENTS', 'NO_COMPATIBLE_AGENTS',
+    'EXECUTION_SCOPE_DENIED', 'IDEMPOTENCY_CONFLICT',
+})
+
+
+def http_failure(error, method, path):
+    # Never retain the exception URL, reason, headers, or arbitrary server text.
+    route = urllib.parse.urlsplit(path).path
+    parts = route.strip('/').split('/')
+    if route in {'/generate', '/status', '/fleet', '/fleet/model-plans'}:
+        safe_path = route
+    elif len(parts) in {2, 3} and parts[0] == 'job':
+        safe_path = '/job/:id' + ('/image' if len(parts) == 3 and parts[2] == 'image' else '')
+    elif len(parts) in {3, 4} and parts[:2] == ['fleet', 'model-plans']:
+        safe_path = '/fleet/model-plans/:id' + ('/apply' if len(parts) == 4 and parts[3] == 'apply' else '')
+    elif len(parts) == 3 and parts[:2] == ['fleet', 'nodes']:
+        safe_path = '/fleet/nodes/:id'
+    else:
+        safe_path = 'other'
+    diagnostic = {'status': error.code, 'method': method if method in {'GET', 'POST', 'PATCH', 'DELETE'} else 'other', 'path': safe_path}
+    try:
+        body = error.read(4097)
+        payload = json.loads(body) if len(body) <= 4096 else None
+        code = payload.get('code') if isinstance(payload, dict) else None
+        if isinstance(code, str) and code in HTTP_ERROR_CODES:
+            diagnostic['code'] = code
+    except (OSError, ValueError, TypeError):
+        pass
+    finally:
+        error.close()
+    return diagnostic
+
+
+def record_failure(receipt, error):
+    receipt['status'] = 'failed'
+    receipt['errorType'] = type(error).__name__
+    if isinstance(error, QualificationError):
+        receipt['reason'] = str(error)
+    if isinstance(error, urllib.error.HTTPError) and hasattr(error, 'qualification_diagnostic'):
+        receipt['httpFailure'] = error.qualification_diagnostic
+
+
 def make_api(token, opener=None, token_provider=None):
     opener = opener or urllib.request.build_opener(NoRedirect())
     def api(method, path, body=None):
@@ -39,8 +82,12 @@ def make_api(token, opener=None, token_provider=None):
             data=None if body is None else json.dumps(body).encode(), method=method,
             headers={'Authorization': 'Bearer ' + (token_provider() if token_provider else token), 'Content-Type': 'application/json',
                      'User-Agent': 'animatic-node-qualification/1.0'})
-        with opener.open(request, timeout=30) as response:
-            return json.load(response)
+        try:
+            with opener.open(request, timeout=30) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as error:
+            error.qualification_diagnostic = http_failure(error, method, path)
+            raise
     return api
 
 
@@ -129,6 +176,36 @@ def selected_node(status, fleet, device_id, expected_name):
     return node
 
 
+def wait_for_model_readiness(api, device_id, expected_name, agent_id, sleep, polls, receipt, save):
+    for _ in range(polls):
+        fleet = api('GET', '/fleet')
+        status = api('GET', '/status')
+        node = selected_node(status, fleet, device_id, expected_name)
+        connected = next(item for item in status['agents'] if item.get('device_id') == device_id)
+        runtime = node.get('runtime', {})
+        inventory_status = runtime.get('inventory_status')
+        receipt['lastModelReadiness'] = {
+            'poll': _ + 1,
+            'inventoryStatus': inventory_status if inventory_status in {'reported', 'empty', 'unavailable', 'failed'} else 'unknown',
+            'installedModelPresent': MODEL in runtime.get('installed_models', []),
+            'fleetCapabilityPresent': MODEL in node.get('capabilities', {}).get('models', []),
+            'connectedCapabilityPresent': MODEL in connected.get('capabilities', {}).get('models', []),
+            'sameAgent': node.get('agent_id') == agent_id and connected.get('agent_id') == agent_id,
+        }
+        save()
+        if not receipt['lastModelReadiness']['sameAgent']:
+            raise QualificationError('Dedicated agent changed while awaiting model readiness')
+        if runtime.get('inventory_status') == 'failed':
+            raise QualificationError('Dedicated Node model inventory failed; inspect Node inventory diagnostics before generating')
+        if (runtime.get('inventory_status') == 'reported' and
+                MODEL in runtime.get('installed_models', []) and
+                MODEL in node.get('capabilities', {}).get('models', []) and
+                MODEL in connected.get('capabilities', {}).get('models', [])):
+            return
+        sleep(3)
+    raise QualificationError('Model inventory or capability readiness deadline reached; no generation was submitted')
+
+
 def run(api, device_id, expected_name, owner_id, output, receipt, save,
         sleep=time.sleep, polls=400, revoke=False, decode=decode_image):
     """Injectable transport makes authorization/placement/cleanup testable offline."""
@@ -178,7 +255,9 @@ def run(api, device_id, expected_name, owner_id, output, receipt, save,
             plan = poll('/fleet/model-plans/' + plan_id, lambda p: p.get('state') in {'finished', 'failed', 'cancelled'})
             if plan['state'] != 'finished':
                 raise QualificationError('Pinned model installation did not finish')
+        wait_for_model_readiness(api, device_id, expected_name, node['agent_id'], sleep, polls, receipt, save)
         receipt['modelInstalled'] = True
+        receipt['modelReadiness'] = {'inventoryStatus': 'reported', 'model': MODEL, 'sameAgent': True, 'capabilityAdvertised': True}
         save()
 
         job_id = submit('generation', 4)
@@ -302,11 +381,8 @@ def main():
             receipt['dedicatedRefreshRevokedAndRejected'] = True
             save()
     except Exception as error:
-        receipt['status'] = 'failed'
         # Provider errors can echo credentials, prompts, or signed URLs.
-        receipt['errorType'] = type(error).__name__
-        if isinstance(error, QualificationError):
-            receipt['reason'] = str(error)
+        record_failure(receipt, error)
         save()
     print(json.dumps({'status': receipt['status'], 'receipt': str(output / 'receipt.json')}))
     return 0 if receipt['status'] == 'passed' and not receipt.get('cleanupErrors') else 1
