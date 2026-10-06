@@ -77,7 +77,7 @@ class QualificationTests(unittest.TestCase):
                                      'agents': [{'device_name': owned_name, 'device_id': 'owned-node'}] if owned_name else []})
                 if request.full_url.endswith('/graphql'):
                     if 'gpuTypes' in body['query']:
-                        return Response({'data': {'gpuTypes': [{'id': 'NVIDIA A40', 'securePrice': 0.49}, {'id': 'NVIDIA RTX A6000', 'securePrice': 0.53}]}})
+                        return Response({'data': {'gpuTypes': [{'id': 'NVIDIA A40', 'securePrice': 0.49}, {'id': 'NVIDIA RTX A6000', 'securePrice': 0.53}, {'id': 'NVIDIA L40', 'securePrice': 0.82}]}})
                     if capacity_rejected:
                         return Response({'errors': [{'message': 'No capacity available'}], 'data': {'podFindAndDeployOnDemand': None}})
                     pod_created = True
@@ -165,7 +165,9 @@ class QualificationTests(unittest.TestCase):
             selected_gpu = gpu or 'NVIDIA A40'
             self.assertEqual(config['gpuTypeId'], selected_gpu)
             self.assertEqual(receipt['gpu'], selected_gpu)
-            self.assertEqual(receipt['quotedGPUCostPerHourUSD'], 0.53 if gpu else 0.49)
+            self.assertEqual(receipt['quotedGPUCostPerHourUSD'], {'NVIDIA A40': 0.49, 'NVIDIA RTX A6000': 0.53, 'NVIDIA L40': 0.82}[selected_gpu])
+            self.assertEqual(receipt['maxDurationSeconds'], 3600)
+            self.assertEqual(receipt['budgetUSD'], 20)
             self.assertEqual(config['minMemoryInGb'], 48)
             self.assertEqual(config['allowedCudaVersions'], ['12.9', '13.0'])
             hosting = next(item['value'] for item in config['env'] if item['key'] == 'MERERUN_NODE_HOSTING_LABEL')
@@ -185,6 +187,9 @@ class QualificationTests(unittest.TestCase):
 
     def test_explicit_a6000_propagates_without_automatic_fallback(self):
         self.run_scenario(False, gpu='NVIDIA RTX A6000')
+
+    def test_explicit_l40_propagates_without_automatic_fallback(self):
+        self.run_scenario(False, gpu='NVIDIA L40')
 
     def test_unknown_gpu_rejected_before_credentials_or_api(self):
         argv = ['qualify', '--gpu', 'NVIDIA H100', '--registry-password-file', 'unused',
