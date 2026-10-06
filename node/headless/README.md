@@ -104,14 +104,16 @@ skips model work and checks private state only. `qualify-runpod.py --state-only
 restart; it still deletes its owned resources on failure.
 
 `qualify-runpod.py` requires `--execute`, an immutable image reference, and a
-short-lived pull-only registry password file. It selects one secure A40 only
-when the current GPU quote is at most US$1/hour, requests a one-hour provider
+short-lived pull-only registry password file. It defaults to one secure A40;
+`--gpu "NVIDIA RTX A6000"` or `--gpu "NVIDIA L40"` explicitly selects another
+48 GB GPU. There is no automatic fallback. The current quote must be at most
+US$1/hour and the allocated rate at most US$1.10/hour. It requests a one-hour provider
 termination deadline, and deletes its own Pod and registry credential. It
 records a private receipt and logs, reconciles an ambiguous creation by unique
 name without replaying it, and preserves unrelated account resources. The
-elapsed-rate estimate is not a substitute for final provider billing. Its five
-mock API tests cover successful cleanup, ambiguous creation recovery, oversized SSE progress, private marker restart and mismatch rejection, and secret
-exclusion: `python3 -m unittest discover -s node/headless -p 'test_*.py'`.
+elapsed-rate estimate is not a substitute for final provider billing. Its controller and qualifier
+tests cover cleanup, ambiguous creation recovery, model readiness, bounded HTTP
+diagnostics, explicit GPU selection, private-state restart and secret exclusion: `python3 -m unittest discover -s node/headless -p 'test_*.py'`.
 
 The model source pinned by the v0.60.1 catalog is
 `filipstrand/Z-Image-Turbo-mflux-4bit` at
@@ -120,6 +122,14 @@ The model source pinned by the v0.60.1 catalog is
 inspection used a temporary CUDA driver stub only to load the CLI on the Mac's
 Docker VM; no model was executed by that inspection. The independent live A40 run provided the actual NVIDIA driver and completed
 inference without those local inspection stubs.
+
+For the Animatic account hook, additional model-license acceptance defaults to
+false. After the account owner reviews and accepts the applicable
+[LTX-2.x terms](https://github.com/Lightricks/LTX-2/blob/main/LICENSE-2_x), set
+`ANIMATIC_QUALIFICATION_ACCEPT_MODEL_LICENSE=video-ltx25-distilled-bf16` for the
+bounded controller invocation. The hook rejects other values and records the
+exact-model acknowledgment. Node forwards explicit acceptance to both model
+preflight and download; it does not bypass hardware or storage checks.
 
 ## Declared hosting
 
