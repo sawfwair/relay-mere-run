@@ -230,8 +230,8 @@ export class MereRunRelay extends DurableObject<Env> {
 
   private prepareJobForStorage(job: Job): Job {
     const jobToStore = { ...job };
-    if (jobToStore.result?.image_data) {
-      jobToStore.result = { ...jobToStore.result, image_data: undefined };
+    if (jobToStore.result) {
+      jobToStore.result = { ...jobToStore.result, image_data: undefined, media_data: undefined };
     }
     if (jobToStore.request.input_image_data) {
       jobToStore.request = { ...jobToStore.request, input_image_data: null };
