@@ -184,6 +184,28 @@ class QualificationTests(unittest.TestCase):
             if restart:
                 self.assertEqual(receipt['privateStateRestored'], marker_matches)
                 self.assertEqual(sum(url.endswith('/restart') for url, _, _ in requests), 1)
+            return config, receipt
+
+    def test_account_storage_fits_pinned_ltx_download_staging_and_both_models(self):
+        config, receipt = self.run_scenario(False, account=True)
+        # Immutable HF tree sizes for the v0.60.1 selected payloads, not the
+        # conservative image catalog estimate. Decimal GB is the smaller unit.
+        largest_download = 37_985_685_664
+        ltx_payload = 53_878_517_792
+        image_payload = 5_907_440_828
+        self.assertGreaterEqual(config['containerDiskInGb'] * 1_000_000_000,
+                                largest_download + 20 * 1024 ** 3,
+                                'Linux download temp plus CUDA/container headroom must fit root disk')
+        self.assertGreaterEqual(config['volumeInGb'] * 1_000_000_000,
+                                ltx_payload + image_payload + largest_download,
+                                'Cache must fit both models with conservative materialization headroom')
+        self.assertEqual(receipt['storage']['containerDiskInGb'], config['containerDiskInGb'])
+        self.assertEqual(receipt['storage']['volumeInGb'], config['volumeInGb'])
+
+    def test_small_preflight_probe_retains_its_existing_storage_allocation(self):
+        config, _ = self.run_scenario(False)
+        self.assertEqual(config['containerDiskInGb'], 30)
+        self.assertEqual(config['volumeInGb'], 70)
 
     def test_explicit_a6000_propagates_without_automatic_fallback(self):
         self.run_scenario(False, gpu='NVIDIA RTX A6000')

@@ -37,6 +37,59 @@ owned-resource cleanup still apply. The image defaults to the immutable `release
 `--image` override requires a full SHA256 digest; mutable tags are rejected before
 provider requests. Registry credential arguments remain required. `--state-only` and `--restart-probe` cannot be combined with account mode.
 
+### Account storage allocation
+
+Account runs request an **80 GB container disk and a 120 GB cache volume**.
+Standalone GPU and private-state probes retain their 30 GB container disk and
+70 GB cache volume. The receipt records the requested sizes under `storage`.
+The one-hour deadline, US$1/hour GPU quote limit, US$1.10/hour assigned total-rate
+limit, and existing spending bound still apply. This is a provider allocation
+change; it does not require a new Node image.
+
+The pinned runtime is `v0.60.1`. Its selected LTX payload already includes the
+quantized Gemma 4 text encoder; do not add the separate upstream BF16 encoder
+size to the download estimate. Pinned payload sizes checked on October 12 are:
+
+| Payload | Bytes | GiB |
+| --- | ---: | ---: |
+| Complete `video-ltx25-distilled-bf16` selection | 53,878,517,792 | 50.178 |
+| Selected `image-zimage-nano` files | 5,907,440,828 | 5.502 |
+| Both installed payloads | 59,785,958,620 | 55.680 |
+| Largest LTX download, `distilled-transformer-bf16.safetensors` | 37,985,685,664 | 35.377 |
+
+The LTX selection and total are defined in
+[`LTX25Resources.swift` at v0.60.1](https://github.com/sawfwair/mere-run/blob/v0.60.1/Sources/MereRunCore/LTX/LTX25Resources.swift).
+Its pinned repository revision is
+[`cf8a174746cd14796c81ca2b54e035dc32e69bd8`](https://huggingface.co/Sawfwair/LTX-2.5-Distilled-BF16-MLX-Q4-Text/tree/cf8a174746cd14796c81ca2b54e035dc32e69bd8).
+The largest file size comes from that revision's public tree metadata for
+`.mere-run/ltx25-native-v1/distilled-transformer-bf16.safetensors`.
+The image total is the sum of the 16 files selected by
+`ManagedModelCatalog+Image.swift` at
+[`b3a8f31115a11f2f9e2fa0bfbc8d78dcc3e6568b`](https://huggingface.co/filipstrand/Z-Image-Turbo-mflux-4bit/tree/b3a8f31115a11f2f9e2fa0bfbc8d78dcc3e6568b).
+The catalog's conservative image estimate is 20,538,488,559 bytes; it is not the
+measured selected payload. Summing that estimate with LTX gives 69.306 GiB,
+rather than the actual selected 55.680 GiB.
+
+Linux `HubSnapshot.swift` downloads each complete file through a Foundation
+download task, retains it in `FileManager.default.temporaryDirectory`, and then
+moves it into the Hub cache. The pinned image does not override `TMPDIR`, so its
+cache environment variables do not move this temporary download off the
+container filesystem. A 30 GB root cannot hold the 35.377 GiB transformer even
+before container overhead. The 80 GB root leaves more than 20 GiB of headroom
+above that file, treating provider GB as decimal conservatively. The 120 GB
+cache exceeds both selected payloads plus another largest-file allowance.
+Final Hub references use hard links, with symlink fallback, rather than a
+required second copy of every payload. The model pull disk check also requires
+an estimated download plus 20 percent safety margin on the cache filesystem.
+
+This is a source-and-metadata sizing finding. The interrupted live run did not
+expose a remote `ENOSPC` error or filesystem measurements, so it does not prove
+that storage caused the observed delay. Node model plans run
+`model pull --quiet`, capture stdout and stderr until the child exits, and
+publish a `pulling` event without streaming byte progress. Silence while that
+event remains active does not establish a stalled transfer. The account hook's
+polling deadline and the controller deadline remain separate limits.
+
 The default Relay qualifier installs only `image-zimage-nano` through the real
 model-plan protocol with license acceptance disabled, requests one 512×512
 four-step image, receives and fully decodes the uploaded PNG, cancels a second
@@ -108,8 +161,10 @@ Then complete cancellation/revocation and return control for Pod cleanup.
 
 ## Remaining evidence boundaries
 
-The controller and Relay qualifier have offline API tests. Until the dedicated
-grant is approved and the live chain runs, no account result is qualified.
+The controller and Relay qualifier have offline API tests. Account-approved
+image generation, cancellation, persistent Animatic selection, and decoded
+still-hold export passed on October 6 and October 12. Motion delivery and live
+lease interruption recovery remain unqualified.
 Cancellation checks Relay's terminal state, output suppression, and released
 availability; remote GPU-process termination still needs telemetry or process
 evidence. Fleet-node revocation, refresh-token revocation, account admission
@@ -154,12 +209,15 @@ cleanup remains enforced by the parent deadline even if those API cleanup calls
 cannot finish. Cleanup failures prevent a passing receipt. The dedicated project
 and its media remain for review.
 
-The hook's nine offline tests cover successful contract sequencing, owner/device/
-agent mismatch, missing placement support, invalid rendered frame count,
-ambiguous mutation replay refusal, origin protection and polling bounds. Syntax
-and ESLint checks passed. Together with eleven controller and eight Relay API tests,
-these are harness evidence only; the real account chain remains pending.
+Offline tests cover contract sequencing, owner/device/agent mismatch, placement
+support, delivered frame counts, ambiguous mutation replay refusal, origin
+protection, polling bounds, and interrupted cleanup. Live results are recorded
+separately in [Animatic PR #113](https://github.com/a-github-name/animatic/pull/113).
 
-The latest enrollment ended with the broker's `expired_token` response at about
-15:28 UTC on 2026-10-04 without producing `auth.json`. No replacement grant or
-paid Pod was created. Request a fresh grant when the owner is ready to approve.
+On October 12, the pinned image passed the image-to-export path. LTX installation
+was canceled after the root-disk sizing flaw was verified; no motion request was
+submitted and no remote disk-full error was observed. The dedicated Node, Pod,
+and temporary registry entry were cleaned up. The bootstrap refresh token was
+no longer usable after remote token rotation. Another isolated run requires a
+fresh approved Node session and the corrected storage allocation. Never refresh
+the host bootstrap copy while its remote Node is active.
