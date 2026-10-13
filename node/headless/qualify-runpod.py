@@ -141,9 +141,16 @@ def main():
     root = pathlib.Path(args.receipt_dir)
     root.mkdir(parents=True, exist_ok=False, mode=0o700)
     name = 'animatic-node-qualification-' + uuid.uuid4().hex[:12]
+    # Account hooks may install the pinned LTX model. Its largest 37.99 GB
+    # file stages in Linux /tmp before moving into /data/cache. Keep root and
+    # cache headroom independent; neither a larger cache alone nor quiet pull
+    # progress makes the old 30 GB root sufficient. See ACCOUNT-QUALIFICATION.md.
+    storage = {'containerDiskInGb': 80 if node_auth else 30,
+               'volumeInGb': 120 if node_auth else 70}
     receipt = {'name': name, 'image': args.image, 'purpose': 'Private state/restart only' if args.state_only else 'GPU runtime preflight only',
                'relayJobQualified': False, 'gpu': args.gpu, 'gpuCount': 1,
                'maxDurationSeconds': 3600, 'budgetUSD': 20, 'status': 'starting'}
+    receipt['storage'] = storage
     if node_auth:
         receipt['purpose'] = 'Dedicated approved Node account qualification'
     registry_id = pod_id = None
@@ -202,7 +209,7 @@ def main():
         termination = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat()
         config = {'name': name, 'cloudType': 'SECURE', 'gpuTypeId': receipt['gpu'],
             'gpuCount': 1, 'imageName': args.image, 'containerRegistryAuthId': registry_id,
-            'containerDiskInGb': 30, 'volumeInGb': 70, 'volumeMountPath': '/data',
+            **storage, 'volumeMountPath': '/data',
             'dockerArgs': json.dumps({'cmd': ['state-preflight' if args.state_only else 'gpu-preflight'], 'entrypoint': ['/usr/local/bin/node-container-entrypoint']}), 'startSsh': False, 'startJupyter': False,
             'supportPublicIp': False, 'allowedCudaVersions': ['12.9', '13.0'],
             'minMemoryInGb': 48, 'minVcpuCount': 4, 'terminateAfter': termination,
