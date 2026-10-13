@@ -161,8 +161,10 @@ Then complete cancellation/revocation and return control for Pod cleanup.
 
 ## Remaining evidence boundaries
 
-The controller and Relay qualifier have offline API tests. Until the dedicated
-grant is approved and the live chain runs, no account result is qualified.
+The controller and Relay qualifier have offline API tests. Account-approved
+image generation, cancellation, persistent Animatic selection, and decoded
+still-hold export passed on October 6 and October 12. Motion delivery and live
+lease interruption recovery remain unqualified.
 Cancellation checks Relay's terminal state, output suppression, and released
 availability; remote GPU-process termination still needs telemetry or process
 evidence. Fleet-node revocation, refresh-token revocation, account admission
@@ -207,12 +209,15 @@ cleanup remains enforced by the parent deadline even if those API cleanup calls
 cannot finish. Cleanup failures prevent a passing receipt. The dedicated project
 and its media remain for review.
 
-The hook's nine offline tests cover successful contract sequencing, owner/device/
-agent mismatch, missing placement support, invalid rendered frame count,
-ambiguous mutation replay refusal, origin protection and polling bounds. Syntax
-and ESLint checks passed. Together with eleven controller and eight Relay API tests,
-these are harness evidence only; the real account chain remains pending.
+Offline tests cover contract sequencing, owner/device/agent mismatch, placement
+support, delivered frame counts, ambiguous mutation replay refusal, origin
+protection, polling bounds, and interrupted cleanup. Live results are recorded
+separately in [Animatic PR #113](https://github.com/a-github-name/animatic/pull/113).
 
-The latest enrollment ended with the broker's `expired_token` response at about
-15:28 UTC on 2026-10-04 without producing `auth.json`. No replacement grant or
-paid Pod was created. Request a fresh grant when the owner is ready to approve.
+On October 12, the pinned image passed the image-to-export path. LTX installation
+was canceled after the root-disk sizing flaw was verified; no motion request was
+submitted and no remote disk-full error was observed. The dedicated Node, Pod,
+and temporary registry entry were cleaned up. The bootstrap refresh token was
+no longer usable after remote token rotation. Another isolated run requires a
+fresh approved Node session and the corrected storage allocation. Never refresh
+the host bootstrap copy while its remote Node is active.
