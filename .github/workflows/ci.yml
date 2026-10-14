@@ -39,7 +39,7 @@ jobs:
       - name: Enforce Worker coverage thresholds
         run: pnpm test:coverage
       - name: Upload coverage evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: worker-coverage
           path: |
@@ -116,14 +116,14 @@ jobs:
           deb="$(find node/src-tauri/target/release/bundle/deb -name '*.deb' -type f -print -quit)"
           ./scripts/verify-node-deb.sh "$deb" x86_64
       - name: Upload AppImage
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: runner.os == 'Linux'
         with:
           name: mere-run-node-linux-x86_64
           path: node/src-tauri/target/release/bundle/appimage/*.AppImage
           if-no-files-found: error
       - name: Upload Debian package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: runner.os == 'Linux'
         with:
           name: mere-run-node-linux-x86_64-deb
