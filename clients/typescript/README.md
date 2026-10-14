@@ -2,6 +2,17 @@
 
 Drop-in TypeScript client for the MereRun Relay HTTP API.
 
+Batch response validation uses Zod 4. Install `zod` when copying this client into
+another project, and include `batch-contracts.ts` and `batch-list-contracts.ts`.
+
+## Graph batches
+
+Use `createGraphBatch`, `uploadGraphBatchAsset`, and `commitGraphBatch` with the
+immutable request described in [durable graph batches](../../docs/graph-batches.md).
+`getGraphBatch` assembles the ordered result pages. `listGraphBatches`,
+`cancelGraphBatch`, and `retryGraphBatch` provide account discovery and lifecycle control.
+Retain the original request and pass a stable retry UUID when replaying a lost retry response.
+
 ## Use
 
 ```ts

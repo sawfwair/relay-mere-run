@@ -133,6 +133,8 @@ impl AsrBackend {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphWorkerCapabilities {
+    #[serde(default)]
+    pub assignment_tokens: bool,
     pub schema_version: u32,
     pub worker_version: String,
     pub contract_versions: Vec<String>,

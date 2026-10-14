@@ -22,6 +22,10 @@ import {
   isUploadResponse,
 } from './runtime-contracts';
 import { isGraphStatusResponse, type GraphStatusResponse, type GraphSubmission } from './graph-contracts';
+import { isGraphBatchResponse, type GraphBatchResponse, type GraphBatchSubmission } from './batch-contracts';
+import { isGraphBatchList, type GraphBatchSummary } from './batch-list-contracts';
+export type { GraphBatchSummary } from './batch-list-contracts';
+export type { GraphBatchResponse, GraphBatchSubmission } from './batch-contracts';
 export type { GraphDataPolicy, GraphPayloadState, GraphExecutionState, GraphStatusResponse, GraphSubmission } from './graph-contracts';
 
 export const DEFAULT_MERE_RUN_RELAY_BASE_URL = 'https://relay.mere.run';
@@ -542,6 +546,59 @@ export class MereRunRelayClient {
   /** Keep the exact original submission for idempotent retries or replay_required recovery. */
   async submitGraph(request: GraphSubmission): Promise<GraphStatusResponse> {
     return this.request('/graph-jobs', isGraphStatusResponse, { method: 'POST', body: JSON.stringify(request) });
+  }
+
+  async createGraphBatch(request: GraphBatchSubmission): Promise<GraphBatchResponse> {
+    const batch = await this.request('/graph-batches', isGraphBatchResponse, { method: 'POST', body: JSON.stringify(request) });
+    if (batch.batch_id !== request.batch_id) throw new Error('Relay returned a different batch identity');
+    return batch;
+  }
+
+  async uploadGraphBatchAsset(batchId: string, digest: string, bytes: Uint8Array): Promise<void> {
+    if (!/^[a-f0-9]{64}$/u.test(digest)) throw new Error('Invalid asset digest');
+    await this.request(`/graph-batches/${encodeURIComponent(batchId)}/assets/${digest}`,
+      (value): value is { digest: string; stored: true } => typeof value === 'object' && value !== null
+        && 'digest' in value && value.digest === digest && 'stored' in value && value.stored === true,
+      { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' }, body: bytes.slice().buffer });
+  }
+
+  async getGraphBatch(batchId: string): Promise<GraphBatchResponse> {
+    return this.batchRequest(batchId, 'GET');
+  }
+
+  async listGraphBatches(): Promise<GraphBatchSummary[]> {
+    return (await this.request('/graph-batches', isGraphBatchList)).batches;
+  }
+  async commitGraphBatch(batchId: string): Promise<GraphBatchResponse> {
+    return this.batchRequest(batchId, 'POST', '/commit');
+  }
+  async cancelGraphBatch(batchId: string): Promise<GraphBatchResponse> {
+    return this.batchRequest(batchId, 'DELETE');
+  }
+  async retryGraphBatch(batchId: string, retryKey = crypto.randomUUID()): Promise<GraphBatchResponse> {
+    return this.batchRequest(batchId, 'POST', '/retry', JSON.stringify({ retry_key: retryKey }));
+  }
+
+  private async batchRequest(batchId: string, method: string, action = '', body?: string): Promise<GraphBatchResponse> {
+    let batch = await this.request(`/graph-batches/${encodeURIComponent(batchId)}${action}`, isGraphBatchResponse, { method, body });
+    if (batch.batch_id !== batchId) throw new Error('Relay returned a different batch identity');
+    const items = [...batch.items];
+    const count = batch.item_count;
+    const fingerprint = batch.request_sha256;
+    while (batch.next_cursor != null) {
+      const cursor = batch.next_cursor;
+      if (cursor !== items.length) throw new Error('Invalid batch page cursor');
+      batch = await this.request(`/graph-batches/${encodeURIComponent(batchId)}?cursor=${cursor}`, isGraphBatchResponse);
+      if (batch.batch_id !== batchId || batch.item_count !== count || batch.request_sha256 !== fingerprint || !batch.items.length) {
+        throw new Error('Invalid batch result page');
+      }
+      items.push(...batch.items);
+    }
+    if (items.length !== count || new Set(items.map((item) => item.job_id)).size !== count
+        || new Set(items.map((item) => item.key)).size !== count
+        || !items.every((item, index) => item.ordinal === index)) throw new Error('Incomplete batch result index');
+    batch.items = items;
+    return batch;
   }
 
   async commitGraph(jobId: string): Promise<GraphStatusResponse> {

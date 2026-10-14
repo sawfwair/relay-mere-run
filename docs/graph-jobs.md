@@ -2,6 +2,7 @@
 
 The relay brokers immutable `mere.run` workflow bundles as a first-class work
 kind. Graph jobs are independent from image, media, chat, and plugin tool jobs.
+Use [durable graph batches](graph-batches.md) for independent input sets.
 The complete graph is placed on one compatible node so downstream nodes reuse
 intermediate artifacts on that machine. Hosted media previews are verified
 copies of those local files.

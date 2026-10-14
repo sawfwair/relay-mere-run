@@ -1,3 +1,4 @@
+import { forwardClientBatch } from './relay-batch-routing';
 import type {
   Env,
   JobStatusResponse,
@@ -167,6 +168,8 @@ export async function handleClientApi(
   userId: string
 ): Promise<Response> {
   try {
+    const batch = forwardClientBatch(request, env, userId);
+    if (batch) return await batch;
     return await handleClientApiUnchecked(request, env, userId);
   } catch (error) {
     const response = invalidJsonResponse(error);
@@ -189,6 +192,7 @@ async function handleClientApiUnchecked(
   // Get user's Durable Object
   const id = env.MERE_RUN_RELAY.idFromName(userId);
   const relay = env.MERE_RUN_RELAY.get(id);
+
 
   if (path === '/asr/stream-ticket' && request.method === 'POST') {
     const rawResponse = await relay.fetch(new Request(`${url.origin}/internal/asr/stream-ticket`, {

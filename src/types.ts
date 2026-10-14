@@ -55,6 +55,7 @@ export interface AsrStreamingCapabilities {
 export type AsrBackend = 'auto' | 'parakeet' | 'qwen';
 
 export interface GraphWorkerCapabilities {
+  assignment_tokens?: boolean;
   schema_version: number;
   worker_version: string;
   contract_versions: string[];
@@ -600,6 +601,8 @@ export interface GraphRunEvent {
 }
 
 export interface GraphJob {
+  batch_id?: string;
+  requires_assignment_token?: boolean;
   job_id: string;
   user_id: string;
   client_id: string;
