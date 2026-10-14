@@ -574,6 +574,66 @@ public struct MereRunRelayAPIError: LocalizedError, Sendable {
     }
 }
 
+public struct MereRunRelayGraphBatch: Decodable, Sendable {
+    public let schemaVersion: Int
+    public let batchId: String
+    public let requestSha256: String
+    public let state: State
+    public let maxInFlight: Int
+    public let maxAttempts: Int
+    public let itemCount: Int
+    public let createdAt: String
+    public let updatedAt: String
+    public let counts: Counts
+    public let items: [Item]
+    public let missingAssetDigests: [String]?
+    public let nextCursor: Int?
+    public let error: String?
+
+    public enum State: String, Decodable, Sendable {
+        case planned, running, finished, failed, cancelled
+    }
+    public struct Counts: Decodable, Sendable {
+        public let pending, queued, running, finished, failed, cancelled: Int
+    }
+    public struct Item: Decodable, Sendable {
+        public let key: String
+        public let ordinal: Int
+        public let jobId: String
+        public let state: ItemState
+        public let attempt: Int
+        public let error: String?
+        public let artifacts: [Artifact]
+    }
+    public enum ItemState: String, Decodable, Sendable {
+        case pending, planned, preflighting, queued, assigned, running, finished, failed, cancelled
+    }
+    public struct Artifact: Decodable, Sendable {
+        public let name, kind, path, contentType, sha256: String
+        public let sizeBytes: Int64
+    }
+}
+
+private struct MereRunRelayBatchAssetResponse: Decodable {
+    let digest: String
+    let stored: Bool
+}
+
+public struct MereRunRelayGraphBatchSummary: Decodable, Sendable {
+    public let schemaVersion: Int
+    public let batchId: String
+    public let requestSha256: String
+    public let state: MereRunRelayGraphBatch.State
+    public let maxInFlight: Int
+    public let maxAttempts: Int
+    public let itemCount: Int
+    public let createdAt: String
+    public let updatedAt: String
+    public let error: String?
+}
+
+private struct MereRunRelayGraphBatchList: Decodable { let batches: [MereRunRelayGraphBatchSummary] }
+
 public final class MereRunRelayClient {
     private let config: MereRunRelayClientConfig
     private let session: URLSession
@@ -597,6 +657,71 @@ public final class MereRunRelayClient {
 
         self.decoder = JSONDecoder()
         self.decoder.keyDecodingStrategy = .convertFromSnakeCase
+    }
+
+    /// Submit canonical batch JSON produced from immutable portable bundles.
+    /// Preserve these exact bytes to resume an interrupted submission.
+    public func createGraphBatch(canonicalRequest: Data) async throws -> MereRunRelayGraphBatch {
+        try await performRequest(path: "/graph-batches", method: "POST", body: canonicalRequest,
+                                 responseType: MereRunRelayGraphBatch.self)
+    }
+
+    public func listGraphBatches() async throws -> [MereRunRelayGraphBatchSummary] {
+        try await performRequest(path: "/graph-batches", method: "GET", responseType: MereRunRelayGraphBatchList.self).batches
+    }
+
+    public func getGraphBatch(batchId: String) async throws -> MereRunRelayGraphBatch {
+        try await graphBatchRequest(batchId: batchId, method: "GET")
+    }
+
+    public func commitGraphBatch(batchId: String) async throws -> MereRunRelayGraphBatch {
+        try await graphBatchRequest(batchId: batchId, action: "/commit", method: "POST")
+    }
+
+    public func cancelGraphBatch(batchId: String) async throws -> MereRunRelayGraphBatch {
+        try await graphBatchRequest(batchId: batchId, method: "DELETE")
+    }
+
+    public func retryGraphBatch(batchId: String, retryKey: UUID = UUID()) async throws -> MereRunRelayGraphBatch {
+        try await graphBatchRequest(batchId: batchId, action: "/retry", method: "POST",
+                                    body: encoder.encode(RetryRequest(retryKey: retryKey.uuidString.lowercased())))
+    }
+
+    public func uploadGraphBatchAsset(batchId: String, digest: String, data: Data) async throws {
+        guard UUID(uuidString: batchId) != nil,
+              digest.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else {
+            throw MereRunRelayClientError.invalidResponse
+        }
+        let response = try await performRequest(path: "/graph-batches/\(batchId)/assets/\(digest)", method: "PUT",
+                                               body: data, contentType: "application/octet-stream",
+                                               responseType: MereRunRelayBatchAssetResponse.self)
+        guard response.stored, response.digest == digest else { throw MereRunRelayClientError.invalidResponse }
+    }
+
+    private func graphBatchRequest(batchId: String, action: String = "", method: String, body: Data? = nil) async throws -> MereRunRelayGraphBatch {
+        guard UUID(uuidString: batchId) != nil else { throw MereRunRelayClientError.invalidResponse }
+        var batch = try await performRequest(path: "/graph-batches/\(batchId)\(action)", method: method, body: body,
+                                             responseType: MereRunRelayGraphBatch.self)
+        guard batch.batchId == batchId, (1...1000).contains(batch.itemCount) else { throw MereRunRelayClientError.invalidResponse }
+        let fingerprint = batch.requestSha256
+        let count = batch.itemCount
+        var items = batch.items
+        while let cursor = batch.nextCursor {
+            guard cursor == items.count, cursor < count else { throw MereRunRelayClientError.invalidResponse }
+            batch = try await performRequest(path: "/graph-batches/\(batchId)?cursor=\(cursor)", method: "GET",
+                                             responseType: MereRunRelayGraphBatch.self)
+            guard batch.batchId == batchId, batch.requestSha256 == fingerprint, batch.itemCount == count,
+                  !batch.items.isEmpty else { throw MereRunRelayClientError.invalidResponse }
+            items.append(contentsOf: batch.items)
+        }
+        guard items.count == count, Set(items.map(\.jobId)).count == count,
+              Set(items.map(\.key)).count == count, items.enumerated().allSatisfy({ $0.offset == $0.element.ordinal }) else {
+            throw MereRunRelayClientError.invalidResponse
+        }
+        return MereRunRelayGraphBatch(schemaVersion: batch.schemaVersion, batchId: batch.batchId, requestSha256: batch.requestSha256,
+                                     state: batch.state, maxInFlight: batch.maxInFlight, maxAttempts: batch.maxAttempts,
+                                     itemCount: count, createdAt: batch.createdAt, updatedAt: batch.updatedAt, counts: batch.counts,
+                                     items: items, missingAssetDigests: batch.missingAssetDigests, nextCursor: nil, error: batch.error)
     }
 
     public func getStatus() async throws -> MereRunRelayStatusResponse {
@@ -1065,3 +1190,5 @@ private struct MereRunRelayErrorPayload: Codable {
     let error: String?
     let code: String?
 }
+
+private struct RetryRequest: Encodable { let retryKey: String }

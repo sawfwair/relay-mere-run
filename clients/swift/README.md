@@ -2,6 +2,16 @@
 
 Drop-in Swift client for the MereRun Relay HTTP API.
 
+## Graph batches
+
+`createGraphBatch(canonicalRequest:)` accepts the canonical JSON bytes of an
+immutable batch request. Preserve those bytes for interrupted submission replay.
+Upload shared inputs with `uploadGraphBatchAsset`, then call `commitGraphBatch`.
+`getGraphBatch` assembles ordered result pages. `listGraphBatches`,
+`cancelGraphBatch`, and `retryGraphBatch` expose account and lifecycle operations.
+Pass the same `retryKey` UUID when replaying a lost retry response.
+See [durable graph batches](../../docs/graph-batches.md) for the wire contract.
+
 ## Use
 
 ```swift

@@ -1,4 +1,5 @@
 import type { RelayContext } from './relay-context';
+import { handleGraphBatchRequest } from './relay-api-batch';
 import type { RelayRouteHandlers } from './relay-routing';
 import {
   handleResult,
@@ -83,6 +84,7 @@ import {
 
 export function createRelayRouteHandlers(ctx: RelayContext): RelayRouteHandlers {
   return {
+    handleGraphBatchRequest: (request) => handleGraphBatchRequest(ctx, request),
     acceptAgentWebSocket: (request: Request) => acceptAgentWebSocket(ctx, request),
     getRequestUserId: (request: Request) => ctx.getRequestUserId(request),
     handleStatus: () => handleStatus(ctx),

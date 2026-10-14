@@ -23,6 +23,7 @@ import type {
 } from './types';
 import type { ConnectedAgentRecord, QueuedWorkDescriptor, RelayContext } from './relay-context';
 import { getInputImageKey, getInputImageUrl } from './r2';
+import { batchIsFenced } from './relay-batch-fence';
 import {
   agentCanAcceptWork,
   getFleetSettings,
@@ -261,6 +262,11 @@ function graphProviderBlockers(info: AgentInfo, graph: GraphJob): GraphPlacement
   return blockers;
 }
 
+function assignmentTokenBlockers(info: AgentInfo, graph: GraphJob): GraphPlacementBlocker[] {
+  return graph.requires_assignment_token && info.capabilities.graph_worker?.assignment_tokens !== true
+    ? [{ code: 'assignment_tokens_required', message: 'Batch jobs require attempt-token-aware workers' }] : [];
+}
+
 export function graphCapabilityBlockers(
   info: AgentInfo,
   graph: GraphJob
@@ -270,6 +276,7 @@ export function graphCapabilityBlockers(
   if (!worker) {
     return [{ code: 'graph_worker_missing', message: 'Node does not advertise graph worker support' }];
   }
+  blockers.push(...assignmentTokenBlockers(info, graph));
   if (!worker.contract_versions.includes(graph.job.contract_version)) {
     blockers.push({
       code: 'contract_version_unsupported',
@@ -590,10 +597,34 @@ export function collectQueuedWork(ctx: RelayContext): QueuedWorkDescriptor[] {
   return allWork;
 }
 
+const preparingAgents = new WeakMap<DurableObjectStorage, Map<string, { ws: WebSocket; workId: string }>>();
+
+function reserveAgent(ctx: RelayContext, agent: ConnectedAgentRecord, workId: string): void {
+  const reservations = preparingAgents.get(ctx.storage) ?? new Map<string, { ws: WebSocket; workId: string }>();
+  reservations.set(agent.info.agent_id, { ws: agent.ws, workId });
+  preparingAgents.set(ctx.storage, reservations);
+  updateAssignedAgentState(ctx, agent.ws, workId);
+}
+
+function agentIsPreparing(ctx: RelayContext, agent: ConnectedAgentRecord): boolean {
+  return preparingAgents.get(ctx.storage)?.get(agent.info.agent_id)?.ws === agent.ws;
+}
+
+function releasePreparation(ctx: RelayContext, agent: ConnectedAgentRecord, workId: string): void {
+  const reservations = preparingAgents.get(ctx.storage);
+  const reservation = reservations?.get(agent.info.agent_id);
+  if (reservation?.ws === agent.ws && reservation.workId === workId) reservations?.delete(agent.info.agent_id);
+}
+
+function agentHasAssignedGraph(ctx: RelayContext, agentId: string): boolean {
+  return [...ctx.graphJobs.values()].some((job) => job.agent_id === agentId && ['assigned', 'preflighting', 'running'].includes(job.state));
+}
+
 async function getOnlineAgent(
   ctx: RelayContext,
   supports: (info: AgentInfo) => boolean,
   model: string,
+  workId: string,
   preferredAgentId?: string,
   scoreOverride?: (info: AgentInfo, mode: SchedulerMode) => number
 ): Promise<ConnectedAgentRecord | undefined> {
@@ -605,7 +636,9 @@ async function getOnlineAgent(
       && preferred.info.status === 'online'
       && agentCanAcceptWork(preferred.info)
       && supports(preferred.info)
+      && !agentIsPreparing(ctx, preferred) && !agentHasAssignedGraph(ctx, preferred.info.agent_id)
     ) {
+      reserveAgent(ctx, preferred, workId);
       return preferred;
     }
   }
@@ -617,6 +650,7 @@ async function getOnlineAgent(
       agent.info.status === 'online'
       && agentCanAcceptWork(agent.info)
       && supports(agent.info)
+      && !agentIsPreparing(ctx, agent) && !agentHasAssignedGraph(ctx, agent.info.agent_id)
     ) {
       candidates.push(agent);
     }
@@ -629,7 +663,9 @@ async function getOnlineAgent(
     || left.info.connected_at.localeCompare(right.info.connected_at)
     || left.info.agent_id.localeCompare(right.info.agent_id)
   );
-  return candidates[0];
+  const selected = candidates[0];
+  if (selected) reserveAgent(ctx, selected, workId);
+  return selected;
 }
 
 function updateAssignedAgentState(
@@ -869,38 +905,105 @@ async function sendToolToAgent(
 }
 
 async function sendGraphToAgent(
-  ctx: RelayContext,
-  graph: GraphJob,
-  agent: ConnectedAgentRecord
+  ctx: RelayContext, graph: GraphJob, agent: ConnectedAgentRecord
 ): Promise<boolean> {
-  // A disconnected previous attempt must not keep a usable upload capability.
-  graph.node_token = crypto.randomUUID().replaceAll('-', '');
-  const message: GraphRequestMessage = {
-    type: 'graph_request',
-    job_id: graph.job_id,
-    client_id: graph.client_id,
-    owner_user_id: graph.user_id,
-    bundle_files: await materializeRelayBundle(ctx, graph),
-    upload_url_base: graphUploadUrlBase(graph),
-    assignment_token: graph.node_token,
-    ...(hasLocalCustody(graph) ? { data_policy: graph.job.data_policy, request_sha256: graph.request_sha256 } : {}),
-  };
-
+  if (graph.state !== 'queued') { releasePreparation(ctx, agent, graph.job_id); return false; }
+  const token = crypto.randomUUID().replaceAll('-', '');
+  updateAssignedAgentState(ctx, agent.ws, graph.job_id);
+  graph.node_token = token;
+  graph.agent_id = agent.info.agent_id;
+  graph.assigned_device_id = agent.info.device_id;
+  graph.state = 'assigned';
+  graph.assigned_at = new Date().toISOString();
+  graph.updated_at = graph.assigned_at;
+  graph.attempt += 1;
   try {
-    agent.ws.send(JSON.stringify(message));
-    graph.agent_id = agent.info.agent_id;
-    graph.assigned_device_id = agent.info.device_id;
-    graph.state = 'assigned';
-    graph.assigned_at = new Date().toISOString();
-    graph.updated_at = graph.assigned_at;
-    graph.attempt += 1;
     await ctx.saveGraphJob(graph);
-    updateAssignedAgentState(ctx, agent.ws, graph.job_id);
-    console.log(`Graph ${graph.job_id} assigned to ${agent.info.agent_id}`);
+    const bundleFiles = await materializeRelayBundle(ctx, graph);
+    const message = await prepareGraphMessage(ctx, graph, agent, token, bundleFiles);
+    if (!message) return false;
+    const latest = ctx.graphJobs.get(graph.job_id);
+    if (latest?.node_token !== token || latest.state !== 'assigned') return false;
+    if (latest.batch_id && batchIsFenced(ctx.storage, latest.batch_id)) {
+      latest.agent_id = null;
+      await ctx.saveGraphJob(latest);
+      ctx.updateAgentInfo(agent.ws, { status: 'online', current_job_id: null });
+      await ctx.assignQueuedWork();
+      return false;
+    }
+    agent.ws.send(JSON.stringify(message));
     return true;
   } catch (error) {
-    console.error('Failed to send graph request to agent:', error);
+    await graphAssignmentFailed(ctx, graph, agent, token, error);
     return false;
+  } finally {
+    releasePreparation(ctx, agent, graph.job_id);
+  }
+}
+
+async function graphParentAllowsDispatch(ctx: RelayContext, graph: GraphJob): Promise<boolean> {
+  if (!graph.batch_id) return true;
+  const parent = await ctx.storage.get<{ state: string }>(`batch:${graph.batch_id}`);
+  return parent?.state === 'running';
+}
+
+async function prepareGraphMessage(
+  ctx: RelayContext, graph: GraphJob, agent: ConnectedAgentRecord, token: string, bundleFiles: GraphRequestMessage['bundle_files']
+): Promise<GraphRequestMessage | null> {
+    const current = await ctx.getGraphJob(graph.job_id);
+    if (!current || current.node_token !== token) return null;
+    if (!(await graphParentAllowsDispatch(ctx, current))) {
+      current.agent_id = null;
+      await ctx.saveGraphJob(current);
+      ctx.updateAgentInfo(agent.ws, { status: 'online', current_job_id: null });
+      await ctx.assignQueuedWork();
+      return null;
+    }
+    if (ctx.getConnectedAgents().get(agent.info.agent_id)?.ws !== agent.ws) throw new Error('GRAPH_CONNECTION_CHANGED');
+    if (current.state !== 'assigned') {
+      if (current.state === 'cancelled') {
+        current.agent_id = null;
+        await ctx.saveGraphJob(current);
+        ctx.updateAgentInfo(agent.ws, { status: 'online', current_job_id: null });
+      }
+      return null;
+    }
+    return {
+      type: 'graph_request', job_id: graph.job_id, client_id: graph.client_id,
+      owner_user_id: graph.user_id, bundle_files: bundleFiles,
+      upload_url_base: graphUploadUrlBase(graph), assignment_token: token,
+      ...(hasLocalCustody(graph) ? { data_policy: graph.job.data_policy, request_sha256: graph.request_sha256 } : {}),
+    };
+ }
+
+async function graphAssignmentFailed(ctx: RelayContext, graph: GraphJob, agent: ConnectedAgentRecord, token: string, error: unknown): Promise<void> {
+    const current = await ctx.getGraphJob(graph.job_id);
+    if (current?.node_token === token && current.state === 'assigned') {
+      await ctx.failInProgressWorkForAgent({ ...agent.info, current_job_id: graph.job_id }, 'GRAPH_ASSIGNMENT_FAILED');
+    }
+    const attached = ctx.getConnectedAgents().get(agent.info.agent_id);
+    if (current?.node_token === token && attached?.ws === agent.ws && attached.info.current_job_id === graph.job_id) {
+      ctx.updateAgentInfo(agent.ws, { status: 'online', current_job_id: null });
+    }
+    await ctx.assignQueuedWork();
+    console.error('Failed to assign graph:', error);
+ }
+
+async function sendReservedWork(
+  ctx: RelayContext, agent: ConnectedAgentRecord, workId: string, send: () => Promise<boolean>
+): Promise<boolean> {
+  let sent = false;
+  try {
+    sent = await send();
+    if (sent && ctx.getConnectedAgents().get(agent.info.agent_id)?.ws === agent.ws) updateAssignedAgentState(ctx, agent.ws, workId);
+    return sent;
+  }
+  finally {
+    releasePreparation(ctx, agent, workId);
+    const current = ctx.getConnectedAgents().get(agent.info.agent_id);
+    if (!sent && current?.ws === agent.ws && current.info.current_job_id === workId) {
+      ctx.updateAgentInfo(agent.ws, { status: 'online', current_job_id: null });
+    }
   }
 }
 
@@ -911,27 +1014,27 @@ export async function assignJobToAgent(
 ): Promise<boolean> {
   if (job.required_device_id && job.user_id !== ctx.userId) return false;
   const model = job.request.model?.trim() || inferJobKind(job);
-  const agent = await getOnlineAgent(ctx, (info) => supportsJob(info, job), model, preferredAgentId);
+  const agent = await getOnlineAgent(ctx, (info) => supportsJob(info, job), model, job.job_id, preferredAgentId);
   if (!agent) {
     return false;
   }
-  return sendJobToAgent(ctx, job, agent);
+  return sendReservedWork(ctx, agent, job.job_id, () => sendJobToAgent(ctx, job, agent));
 }
 
 export async function assignChatToAgent(ctx: RelayContext, chat: Chat): Promise<boolean> {
-  const agent = await getOnlineAgent(ctx, (info) => supportsChat(info, chat), chat.model?.trim() || 'text');
+  const agent = await getOnlineAgent(ctx, (info) => supportsChat(info, chat), chat.model?.trim() || 'text', chat.chat_id);
   if (!agent) {
     return false;
   }
-  return sendChatToAgent(ctx, chat, agent);
+  return sendReservedWork(ctx, agent, chat.chat_id, () => sendChatToAgent(ctx, chat, agent));
 }
 
 export async function assignTalkToAgent(ctx: RelayContext, talk: Talk): Promise<boolean> {
-  const agent = await getOnlineAgent(ctx, supportsTalk, 'talk-nano');
+  const agent = await getOnlineAgent(ctx, supportsTalk, 'talk-nano', talk.talk_id);
   if (!agent) {
     return false;
   }
-  return sendTalkToAgent(ctx, talk, agent);
+  return sendReservedWork(ctx, agent, talk.talk_id, () => sendTalkToAgent(ctx, talk, agent));
 }
 
 export async function assignAsrToAgent(ctx: RelayContext, asr: Asr): Promise<boolean> {
@@ -941,28 +1044,29 @@ export async function assignAsrToAgent(ctx: RelayContext, asr: Asr): Promise<boo
   const agent = await getOnlineAgent(
     ctx,
     (info) => supportsAsr(info, asr),
-    preferredModel
+    preferredModel,
+    asr.asr_id
   );
   if (!agent) {
     return false;
   }
-  return sendAsrToAgent(ctx, asr, agent);
+  return sendReservedWork(ctx, agent, asr.asr_id, () => sendAsrToAgent(ctx, asr, agent));
 }
 
 export async function assignEmbedToAgent(ctx: RelayContext, embed: Embed): Promise<boolean> {
-  const agent = await getOnlineAgent(ctx, supportsEmbed, embed.request.model?.trim() || 'embed');
+  const agent = await getOnlineAgent(ctx, supportsEmbed, embed.request.model?.trim() || 'embed', embed.embed_id);
   if (!agent) {
     return false;
   }
-  return sendEmbedToAgent(ctx, embed, agent);
+  return sendReservedWork(ctx, agent, embed.embed_id, () => sendEmbedToAgent(ctx, embed, agent));
 }
 
 export async function assignOcrToAgent(ctx: RelayContext, ocr: Ocr): Promise<boolean> {
-  const agent = await getOnlineAgent(ctx, supportsOcr, 'ocr');
+  const agent = await getOnlineAgent(ctx, supportsOcr, 'ocr', ocr.ocr_id);
   if (!agent) {
     return false;
   }
-  return sendOcrToAgent(ctx, ocr, agent);
+  return sendReservedWork(ctx, agent, ocr.ocr_id, () => sendOcrToAgent(ctx, ocr, agent));
 }
 
 export async function assignToolToAgent(
@@ -971,11 +1075,11 @@ export async function assignToolToAgent(
   preferredAgentId?: string
 ): Promise<boolean> {
   const model = `${tool.request.plugin}:${tool.request.command}`;
-  const agent = await getOnlineAgent(ctx, (info) => supportsTool(info, tool), model, preferredAgentId);
+  const agent = await getOnlineAgent(ctx, (info) => supportsTool(info, tool), model, tool.tool_id, preferredAgentId);
   if (!agent) {
     return false;
   }
-  return sendToolToAgent(ctx, tool, agent);
+  return sendReservedWork(ctx, agent, tool.tool_id, () => sendToolToAgent(ctx, tool, agent));
 }
 
 export async function assignGraphToAgent(
@@ -986,6 +1090,7 @@ export async function assignGraphToAgent(
     ctx,
     (info) => supportsGraph(info, graph),
     'graph',
+    graph.job_id,
     undefined,
     (info, mode) => scoreAgentForGraph(info, graph, mode)
   );
@@ -993,67 +1098,42 @@ export async function assignGraphToAgent(
   return sendGraphToAgent(ctx, graph, agent);
 }
 
+async function assignWork(ctx: RelayContext, work: QueuedWorkDescriptor): Promise<boolean> {
+  switch (work.type) {
+    case 'job': { const job = ctx.jobs.get(work.id); return job ? assignJobToAgent(ctx, job) : false; }
+    case 'chat': { const job = ctx.chats.get(work.id); return job ? assignChatToAgent(ctx, job) : false; }
+    case 'talk': { const job = ctx.talks.get(work.id); return job ? assignTalkToAgent(ctx, job) : false; }
+    case 'asr': { const job = ctx.asrs.get(work.id); return job ? assignAsrToAgent(ctx, job) : false; }
+    case 'embed': { const job = ctx.embeds.get(work.id); return job ? assignEmbedToAgent(ctx, job) : false; }
+    case 'ocr': { const job = ctx.ocrs.get(work.id); return job ? assignOcrToAgent(ctx, job) : false; }
+    case 'tool': { const job = ctx.tools.get(work.id); return job ? assignToolToAgent(ctx, job) : false; }
+    case 'graph': { const job = ctx.graphJobs.get(work.id); return job ? assignGraphToAgent(ctx, job) : false; }
+  }
+}
+
+function workGroup(ctx: RelayContext, work: QueuedWorkDescriptor): string {
+  return work.type === 'graph' ? ctx.graphJobs.get(work.id)?.batch_id ?? 'foreground' : 'foreground';
+}
+
 export async function assignQueuedWork(ctx: RelayContext): Promise<void> {
+  const groups = new Map<string, QueuedWorkDescriptor[]>();
   for (const work of collectQueuedWork(ctx)) {
-    if (work.type === 'job') {
-      const job = ctx.jobs.get(work.id);
-      if (job && !(await assignJobToAgent(ctx, job))) {
-        continue;
-      }
-      continue;
+    const key = workGroup(ctx, work);
+    const group = groups.get(key) ?? [];
+    group.push(work); groups.set(key, group);
+  }
+  const keys = [...groups.keys()].sort();
+  const last = await ctx.storage.get<string>('relay:queue-turn');
+  const start = last ? (keys.indexOf(last) + 1) % Math.max(1, keys.length) : 0;
+  const ordered = [...keys.slice(start), ...keys.slice(0, start)];
+  for (;;) {
+    let more = false;
+    for (const key of ordered) {
+      const work = groups.get(key)?.shift();
+      if (!work) continue;
+      more = true;
+      if (await assignWork(ctx, work)) await ctx.storage.put('relay:queue-turn', key);
     }
-
-    if (work.type === 'chat') {
-      const chat = ctx.chats.get(work.id);
-      if (chat && !(await assignChatToAgent(ctx, chat))) {
-        continue;
-      }
-      continue;
-    }
-
-    if (work.type === 'talk') {
-      const talk = ctx.talks.get(work.id);
-      if (talk && !(await assignTalkToAgent(ctx, talk))) {
-        continue;
-      }
-      continue;
-    }
-
-    if (work.type === 'asr') {
-      const asr = ctx.asrs.get(work.id);
-      if (asr && !(await assignAsrToAgent(ctx, asr))) {
-        continue;
-      }
-      continue;
-    }
-
-    if (work.type === 'embed') {
-      const embed = ctx.embeds.get(work.id);
-      if (embed && !(await assignEmbedToAgent(ctx, embed))) {
-        continue;
-      }
-      continue;
-    }
-
-    if (work.type === 'ocr') {
-      const ocr = ctx.ocrs.get(work.id);
-      if (ocr && !(await assignOcrToAgent(ctx, ocr))) {
-        continue;
-      }
-      continue;
-    }
-
-    if (work.type === 'graph') {
-      const graph = ctx.graphJobs.get(work.id);
-      if (graph && !(await assignGraphToAgent(ctx, graph))) {
-        continue;
-      }
-      continue;
-    }
-
-    const tool = ctx.tools.get(work.id);
-    if (tool && !(await assignToolToAgent(ctx, tool))) {
-      continue;
-    }
+    if (!more) return;
   }
 }
