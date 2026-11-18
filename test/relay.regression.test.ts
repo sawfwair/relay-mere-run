@@ -17,6 +17,7 @@ import {
   submitTalk,
   submitTool,
   waitForWebSocketJson,
+  relayAssetUrl,
 } from './helpers';
 
 type JsonRecord = Record<string, unknown>;
@@ -497,14 +498,14 @@ describe('relay regressions', () => {
         path: '/api/music',
         capability: 'music',
         contentType: 'audio/wav',
-        mediaUrl: 'https://assets.example/song.wav',
+        file: 'song.wav',
       },
       {
         label: 'video',
         path: '/api/video',
         capability: 'video',
         contentType: 'video/mp4',
-        mediaUrl: 'https://assets.example/clip.mp4',
+        file: 'clip.mp4',
       },
     ] as const;
 
@@ -535,7 +536,7 @@ describe('relay regressions', () => {
             type: 'result',
             job_id: jobId,
             success: true,
-            media_url: target.mediaUrl,
+            media_url: relayAssetUrl(userId, target.file),
             content_type: target.contentType,
             output_kind: target.label,
             generation_time_ms: 25,
@@ -550,7 +551,7 @@ describe('relay regressions', () => {
           );
           const statusJson = await readJson<JobStatusResponse>(statusResponse);
           expect(statusJson.status).toBe('complete');
-          expect(statusJson.result?.media_url).toBe(target.mediaUrl);
+          expect(statusJson.result?.media_url).toBe(relayAssetUrl(userId, target.file));
           expect(statusJson.result?.content_type).toBe(target.contentType);
           expect(statusJson.result?.output_kind).toBe(target.label);
         });
@@ -1026,7 +1027,7 @@ describe('relay regressions', () => {
           type: 'result',
           job_id: jobId,
           success: true,
-          image_url: 'https://example.com/image.png',
+          image_url: relayAssetUrl(userId, 'image.png'),
           seed: 1337,
           generation_time_ms: 42,
         })
@@ -1081,7 +1082,7 @@ describe('relay regressions', () => {
           type: 'result',
           job_id: jobId,
           success: true,
-          image_url: 'https://example.com/image.png',
+          image_url: relayAssetUrl(userId, 'image.png'),
           seed: 9,
           generation_time_ms: 12,
         })
@@ -1139,7 +1140,7 @@ describe('relay regressions', () => {
           type: 'result',
           job_id: jobId,
           success: true,
-          image_url: 'https://example.com/image.png',
+          image_url: relayAssetUrl(userId, 'image.png'),
           seed: 1,
           generation_time_ms: 7,
         })
@@ -1191,7 +1192,7 @@ describe('relay regressions', () => {
           type: 'result',
           job_id: jobId,
           success: true,
-          image_url: 'https://example.com/image.png',
+          image_url: relayAssetUrl(userId, 'image.png'),
           seed: 1,
           generation_time_ms: 7,
         })
@@ -1573,7 +1574,7 @@ describe('relay regressions', () => {
         type: 'talk_response',
         talk_id: id,
         owner_user_id: userId,
-        audio_url: 'https://example.com/audio.wav',
+        audio_url: relayAssetUrl(userId, `${id}.wav`),
         duration_seconds: 1.2,
         sample_rate: 24000,
         output_format: 'wav',

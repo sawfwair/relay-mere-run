@@ -9,6 +9,7 @@ import {
 } from './relay-lifecycle';
 import { TERMINAL_RETAIN_MS } from './relay-agent-common';
 import { recordNodePerformance } from './relay-fleet';
+import { isAccountAssetUrl, NOT_RELAY_ASSET_ERROR } from './r2';
 
 function hasCurrentLease(
   job: { lease_id?: string | null; lease_aware?: boolean },
@@ -43,29 +44,43 @@ export async function handleProgress(
   await ctx.saveJob(job);
 }
 
+/**
+ * A result URL must be the stored object the relay itself returned from upload.
+ * A successful result that names anything else is recorded as a failure.
+ */
+function withRelayIssuedUrlsOnly(ctx: RelayContext, ownerUserId: string, msg: ResultMessage): ResultMessage {
+  if (!msg.success) return msg;
+  const reportedUrls = [msg.image_url, msg.media_url].filter((url): url is string => Boolean(url));
+  if (reportedUrls.every((url) => isAccountAssetUrl(ctx.env, ownerUserId, url))) return msg;
+  console.warn(`Rejecting result for job ${msg.job_id}: result URL is not a relay asset of the job owner`);
+  return { ...msg, success: false, error: NOT_RELAY_ASSET_ERROR };
+}
+
 export async function handleResult(
   ctx: RelayContext,
-  msg: ResultMessage
+  reported: ResultMessage
 ): Promise<void> {
-  const job = await ctx.getJob(msg.job_id);
+  const job = await ctx.getJob(reported.job_id);
   if (!job) {
     await forwardMessageToOwnerIfNeeded(
       ctx,
-      msg.owner_user_id,
+      reported.owner_user_id,
       '/result',
-      msg,
-      `Result for unknown job ${msg.job_id} - job not in memory (may be different DO or already completed)`
+      reported,
+      `Result for unknown job ${reported.job_id} - job not in memory (may be different DO or already completed)`
     );
     return;
   }
-  if (!hasCurrentLease(job, msg.lease_id)) {
-    console.log(`Ignoring result from stale lease for job ${msg.job_id}`);
+  if (!hasCurrentLease(job, reported.lease_id)) {
+    console.log(`Ignoring result from stale lease for job ${reported.job_id}`);
     return;
   }
   if (job.status === 'cancelled') {
-    console.log(`Ignoring late result for cancelled job ${msg.job_id}`);
+    console.log(`Ignoring late result for cancelled job ${reported.job_id}`);
     return;
   }
+
+  const msg = withRelayIssuedUrlsOnly(ctx, job.user_id, reported);
 
   job.status = msg.success ? 'complete' : 'failed';
   job.completed_at = new Date().toISOString();
