@@ -9,6 +9,7 @@ import {
   submitEmbed,
   submitJob,
   waitForWebSocketJson,
+  relayAssetUrl,
 } from './helpers';
 
 type JsonRecord = Record<string, unknown>;
@@ -295,7 +296,7 @@ describe('fleet control plane', () => {
         job_id: submitted.job_id,
         lease_id: assignment.lease_id,
         success: true,
-        media_url: 'https://assets.example/shared.png',
+        media_url: relayAssetUrl(userId, 'shared.png'),
         content_type: 'image/png',
         output_kind: 'image',
       }));
@@ -536,7 +537,7 @@ describe('fleet control plane', () => {
           job_id: submitted.job_id,
           lease_id: firstAssignment.lease_id,
           success: true,
-          media_url: 'https://assets.example/stale.png',
+          media_url: relayAssetUrl(userId, 'stale.png'),
           output_kind: 'image',
           generation_time_ms: 99,
         }),
@@ -552,7 +553,7 @@ describe('fleet control plane', () => {
         job_id: submitted.job_id,
         lease_id: retryAssignment.lease_id,
         success: true,
-        media_url: 'https://assets.example/current.png',
+        media_url: relayAssetUrl(userId, 'current.png'),
         content_type: 'image/png',
         output_kind: 'image',
         generation_time_ms: 123,

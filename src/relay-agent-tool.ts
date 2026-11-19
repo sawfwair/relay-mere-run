@@ -9,6 +9,7 @@ import {
   forwardMessageToOwnerIfNeeded,
 } from './relay-lifecycle';
 import { durationMs, recordNodePerformance } from './relay-fleet';
+import { isAccountAssetUrl, NOT_RELAY_ASSET_ERROR } from './r2';
 
 const TERMINAL_WORK_RETAIN_MS = 60_000;
 
@@ -43,6 +44,16 @@ export async function handleToolResult(
       msg,
       `Result for unknown tool job: ${msg.tool_id}`
     );
+    return;
+  }
+
+  // Each artifact URL must be the stored object the relay returned from upload.
+  const foreignArtifact = (msg.artifacts ?? []).find(
+    (artifact) => Boolean(artifact.url) && !isAccountAssetUrl(ctx.env, tool.user_id, artifact.url as string)
+  );
+  if (foreignArtifact) {
+    console.warn(`Rejecting result for tool ${msg.tool_id}: artifact ${foreignArtifact.name} is not a relay asset of the tool owner`);
+    await handleToolError(ctx, { type: 'tool_error', tool_id: msg.tool_id, owner_user_id: msg.owner_user_id, error: NOT_RELAY_ASSET_ERROR });
     return;
   }
 
