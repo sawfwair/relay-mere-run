@@ -132,6 +132,22 @@ async function graphFixture(asset: Uint8Array): Promise<GraphFixture> {
   };
 }
 
+async function publishEarlyImage(base: string, fixture: GraphFixture): Promise<GraphRunArtifact> {
+  const bytes = new Uint8Array([51, 52, 53]);
+  const digest = await sha256(bytes);
+  const artifact: GraphRunArtifact = { name: `_live-generate-${digest}`, kind: 'graph.node-output',
+    path: `.relay-publications/${digest}`, sha256: digest, size_bytes: bytes.length, content_type: 'image/png' };
+  const uploaded = await SELF.fetch(`${base}/artifacts/${artifact.name}`, { method: 'PUT',
+    headers: { 'Content-Type': artifact.content_type, 'X-Artifact-Size': String(bytes.length),
+      'X-Artifact-Sha256': digest, 'X-Artifact-Path': artifact.path, 'X-Artifact-Kind': artifact.kind }, body: bytes });
+  expect(uploaded.status).toBe(200);
+  const published = await SELF.fetch(`${base}/publications`, { method: 'PUT', body: JSON.stringify({ artifacts: [artifact],
+    run_manifest: { contract_version: 'mere.run/graph-run.v1', job_id: fixture.jobId,
+      graph_fingerprint: fixture.body.job.graph_fingerprint, state: 'running', nodes: [{ id: 'generate', state: 'finished', artifacts: [artifact] }] } }) });
+  expect(published.status).toBe(200);
+  return artifact;
+}
+
 function makeAssetless(body: SubmitGraphJobRequest): void {
   body.graph = {
     schema_version: 1,
@@ -1266,6 +1282,9 @@ describe('portable graph jobs', () => {
         upload_url_base: string;
       }>(ws);
       expect(firstRequest.type).toBe('graph_request');
+      const earlyImage = await publishEarlyImage(firstRequest.upload_url_base, fixture);
+      const earlyUrl = `https://relay/internal/graph-jobs/${fixture.jobId}/artifacts/${earlyImage.name}`;
+      expect(new Uint8Array(await (await relay.fetch(new Request(earlyUrl))).arrayBuffer())).toEqual(new Uint8Array([51, 52, 53]));
 
       const partialArtifact = new Uint8Array([11, 22, 33, 44]);
       const partialDigest = await sha256(partialArtifact);
@@ -1314,12 +1333,15 @@ describe('portable graph jobs', () => {
       const retriedStatus = await readJson<Record<string, unknown>>(retried);
       expect(retriedStatus.state).toBe('assigned');
       expect(retriedStatus.attempt).toBe(2);
+      expect(retriedStatus.artifacts).toEqual([earlyImage]);
+      expect(new Uint8Array(await (await relay.fetch(new Request(earlyUrl))).arrayBuffer())).toEqual(new Uint8Array([51, 52, 53]));
       const secondRequest = await waitForWebSocketJson<{
         type: string;
         bundle_files: Array<{ path: string; sha256: string }>;
         upload_url_base: string;
       }>(ws);
       expect(secondRequest.type).toBe('graph_request');
+      expect((await SELF.fetch(`${firstRequest.upload_url_base}/publications`, { method: 'PUT', body: '{}' })).status).toBe(404);
       expect(secondRequest.bundle_files.map(({ path, sha256 }) => ({ path, sha256 })))
         .toEqual(firstRequest.bundle_files.map(({ path, sha256 }) => ({ path, sha256 })));
       const resumed = await SELF.fetch(

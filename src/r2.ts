@@ -8,6 +8,30 @@ export function buildAssetUrl(env: Env, key: string): string {
   return `${getAssetBaseUrl(env)}/${key}`;
 }
 
+export const NOT_RELAY_ASSET_ERROR = 'Result URL was not issued by this relay.';
+
+/**
+ * True when `url` names an object this relay stored for the account: under the
+ * configured asset base and inside that account's key space.
+ *
+ * A node uploads its output to the relay, receives the stored object's URL, and
+ * reports that URL back. Nothing else is a valid result URL. Without this check
+ * a node could report any address, and the relay would hand it to the job's
+ * owner and to its webhook receiver as a relay result.
+ */
+export function isAccountAssetUrl(env: Env, userId: string, url: string): boolean {
+  const prefix = `${getAssetBaseUrl(env)}/relay/${userId}/`;
+  if (!userId || !url.startsWith(prefix)) return false;
+  const rest = url.slice(prefix.length);
+  if (!rest || rest.startsWith('/') || rest.includes('..') || rest.includes('//')) return false;
+  for (let index = 0; index < rest.length; index += 1) {
+    const code = rest.charCodeAt(index);
+    // No query, fragment, backslash, whitespace or control characters: stored keys have none.
+    if (code <= 0x20 || code === 0x7f || code === 0x3f || code === 0x23 || code === 0x5c) return false;
+  }
+  return true;
+}
+
 /**
  * Generate the R2 object key for a job's result image
  */

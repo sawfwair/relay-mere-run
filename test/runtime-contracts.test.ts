@@ -69,6 +69,21 @@ describe('runtime JSON contracts', () => {
     })).toThrow();
   });
 
+  it('validates video controls used to select the resident runtime', () => {
+    expect(() => submitJobRequestSchema.parse({
+      kind: 'video', prompt: 'ferry', variant: 'unrecognized',
+    })).toThrow();
+    expect(() => submitJobRequestSchema.parse({
+      kind: 'video', prompt: 'ferry', adapter_selections: 'character-look',
+    })).toThrow();
+    expect(() => submitJobRequestSchema.parse({
+      kind: 'video', prompt: 'ferry', continuity: { mode: 2 },
+    })).toThrow();
+    expect(() => submitJobRequestSchema.parse({
+      kind: 'video', prompt: 'ferry', keyframes: [{ time_seconds: 'later' }],
+    })).toThrow();
+  });
+
   it('rejects malformed nested graph documents before queue state is touched', () => {
     expect(() => submitGraphJobRequestSchema.parse({
       job: { contract_version: 'mere.run/job-bundle.v1' },

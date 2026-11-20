@@ -28,11 +28,24 @@ function inferJobKind(request: SubmitJobRequest): 'image' | 'music' | 'video' {
   return 'image';
 }
 
+function canUseRequiredDevice(ctx: RelayContext, deviceId: string | undefined, userId: string): boolean {
+  if (!deviceId) return true;
+  if (!userId || userId !== ctx.userId) return false;
+  return Array.from(ctx.getConnectedAgents().values()).some((agent) => agent.info.device_id === deviceId);
+}
+
+function hasExplicitVideoControls(request: SubmitJobRequest): boolean {
+  return inferJobKind(request) === 'video' && (request.steps !== undefined || request.preflight_required !== undefined || request.max_oom_retries !== undefined);
+}
+
 export async function handleSubmitJob(
   ctx: RelayContext,
   request: SubmitJobRequest & { client_id: string; relay_origin?: string },
   userId: string
 ): Promise<Response> {
+  if (!canUseRequiredDevice(ctx, request.required_device_id, userId)) {
+    return Response.json({ error: 'Selected node is not connected to your fleet', code: 'TARGET_NODE_UNAVAILABLE' }, { status: 403 });
+  }
   const jobId = `job_${crypto.randomUUID().slice(0, 12)}`;
   const origin = request.relay_origin || 'https://relay.mere.run';
   const uploadUrl = generateUploadUrl(origin, userId, jobId);
@@ -45,7 +58,11 @@ export async function handleSubmitJob(
   }
   const fleetSettings = await getFleetSettings(ctx);
 
+
   const jobRequest: JobRequest = {
+    video_controls_version: hasExplicitVideoControls(request) ? 1 : undefined,
+    preflight_required: request.preflight_required,
+    max_oom_retries: request.max_oom_retries,
     kind,
     prompt: request.prompt,
     negative_prompt: request.negative_prompt ?? null,
@@ -58,6 +75,12 @@ export async function handleSubmitJob(
     input_strength: request.input_strength ?? null,
     reference_image_urls: request.reference_image_urls ?? null,
     model: request.model?.trim(),
+    variant: request.variant,
+    guidance_scale: request.guidance_scale,
+    shift: request.shift,
+    adapter_selections: request.adapter_selections,
+    continuity: request.continuity,
+    keyframes: request.keyframes,
     duration_seconds: request.duration_seconds,
     fps: request.fps,
     num_frames: request.num_frames,
@@ -71,6 +94,7 @@ export async function handleSubmitJob(
 
   const job: Job = {
     job_id: jobId,
+    required_device_id: request.required_device_id,
     user_id: userId,
     client_id: request.client_id,
     agent_id: null,
@@ -126,6 +150,7 @@ export async function handleGetJob(ctx: RelayContext, jobId: string): Promise<Re
   }
 
   const response: JobStatusResponse = {
+    required_device_id: job.required_device_id,
     job_id: job.job_id,
     user_id: job.user_id,
     client_id: job.client_id,

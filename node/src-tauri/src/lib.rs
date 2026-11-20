@@ -2,6 +2,7 @@ mod agent;
 mod asr_stream;
 mod config;
 mod deviceauth;
+mod event_sink;
 mod graph;
 mod graph_custody;
 mod hardware;
@@ -14,6 +15,7 @@ mod native_video;
 mod plugins;
 mod process_activity;
 mod protocol;
+mod resident_video;
 mod runtime_binary;
 mod work_gate;
 
@@ -24,6 +26,12 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State, WindowEvent};
 use tokio::sync::watch;
 
 use agent::NodeConfig;
+
+impl<R: Runtime> event_sink::NodeEvents for AppHandle<R> {
+    fn emit_event(&self, event: &str, payload: serde_json::Value) {
+        let _ = self.emit(event, payload);
+    }
+}
 
 const DEFAULT_RELAY_URL: &str = "wss://relay.mere.run/agent";
 

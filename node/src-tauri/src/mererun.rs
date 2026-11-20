@@ -23,6 +23,9 @@ use crate::protocol::{
     TextAdapterCapability, TextAdapterReference,
 };
 
+#[path = "video_controls.rs"]
+mod video_controls;
+
 const DEFAULT_MODEL: &str = "image-klein-9b";
 const DEFAULT_EMBED_MODEL: &str = "text-embed-qwen3-0.6b";
 const DEFAULT_TTS_MODEL: &str = "speech-tts-qwen3-nano";
@@ -825,13 +828,41 @@ fn push_tail(tail: &mut Vec<u8>, chunk: &[u8]) {
     }
 }
 
-/// Run a prepared `mere.run` command, streaming stderr for per-step progress
-/// while retaining a bounded tail for error reporting.
+/// Own the generation process group and its output drain for cancellation-safe drops.
+struct GenerationProcessGuard {
+    process_id: u32,
+    stdout_drain: tokio::task::JoinHandle<()>,
+    armed: bool,
+}
+
+impl Drop for GenerationProcessGuard {
+    fn drop(&mut self) {
+        self.stdout_drain.abort();
+        #[cfg(unix)]
+        if self.armed {
+            // This child owns a fresh process group. Kill descendants too if the
+            // generation future is canceled or its pipe reader fails.
+            unsafe {
+                libc::kill(-(self.process_id as i32), libc::SIGKILL);
+            }
+        }
+    }
+}
+
+/// Run a prepared command with bounded progress/error capture and drop-safe teardown.
 async fn run_streaming_with_progress(
     mut cmd: Command,
     progress: Option<&ProgressSender>,
+    kind: &str,
 ) -> Result<std::process::ExitStatus> {
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.as_std_mut().process_group(0);
+    }
     let mut child = cmd.spawn()?;
 
     let mut stdout = child
@@ -839,9 +870,13 @@ async fn run_streaming_with_progress(
         .take()
         .ok_or_else(|| anyhow!("child stdout unavailable"))?;
     let stdout_drain = tokio::spawn(async move {
-        let mut sink = Vec::new();
-        let _ = stdout.read_to_end(&mut sink).await;
+        let _ = tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await;
     });
+    let mut process_guard = GenerationProcessGuard {
+        process_id: child.id().ok_or_else(|| anyhow!("child pid unavailable"))?,
+        stdout_drain,
+        armed: true,
+    };
 
     let mut stderr = child
         .stderr
@@ -864,11 +899,12 @@ async fn run_streaming_with_progress(
     }
 
     let status = child.wait().await?;
-    let _ = stdout_drain.await;
+    let _ = (&mut process_guard.stdout_drain).await;
+    process_guard.armed = false;
     if !status.success() {
         let stderr_text = String::from_utf8_lossy(&tail);
         return Err(anyhow!(
-            "mere.run image generate failed: {}",
+            "mere.run {kind} generate failed: {}",
             stderr_text.trim()
         ));
     }
@@ -882,16 +918,22 @@ pub async fn generate_job_output(
     progress: Option<ProgressSender>,
 ) -> Result<GeneratedOutput> {
     match req.kind {
-        JobKind::Image => Ok(GeneratedOutput {
-            path: generate_image(req, out_dir, job_id, progress).await?,
-            content_type: "image/png",
-            kind: "image",
-        }),
-        JobKind::Music => Ok(GeneratedOutput {
-            path: generate_music(req, out_dir, job_id).await?,
-            content_type: "audio/wav",
-            kind: "music",
-        }),
+        JobKind::Image => {
+            crate::resident_video::close().await;
+            Ok(GeneratedOutput {
+                path: generate_image(req, out_dir, job_id, progress).await?,
+                content_type: "image/png",
+                kind: "image",
+            })
+        }
+        JobKind::Music => {
+            crate::resident_video::close().await;
+            Ok(GeneratedOutput {
+                path: generate_music(req, out_dir, job_id).await?,
+                content_type: "audio/wav",
+                kind: "music",
+            })
+        }
         JobKind::Video => Ok(GeneratedOutput {
             path: generate_video(req, out_dir, job_id).await?,
             content_type: "video/mp4",
@@ -979,7 +1021,7 @@ pub async fn generate_image(
         }
     }
 
-    run_streaming_with_progress(cmd, progress.as_ref()).await?;
+    run_streaming_with_progress(cmd, progress.as_ref(), "image").await?;
     if !out_path.exists() {
         return Err(anyhow!(
             "mere.run reported success but produced no file at {out_path:?}"
@@ -1059,6 +1101,13 @@ fn build_video_generate_args(
         req.height.to_string().into(),
         "--quiet".into(),
     ];
+    if req.steps > 0 {
+        args.extend(["--steps".into(), req.steps.to_string().into()]);
+    }
+    if let Some(variant) = req.variant.as_deref() {
+        args.push("--variant".into());
+        args.push(variant.into());
+    }
     if let Some(duration) = req.duration_seconds {
         args.push("--duration".into());
         args.push(duration.to_string().into());
@@ -1105,6 +1154,17 @@ fn build_video_generate_args(
 }
 
 pub async fn generate_video(req: &JobRequest, out_dir: &Path, job_id: &str) -> Result<PathBuf> {
+    let binary = resolve_mere_run_binary().await;
+    generate_video_with_binary(req, out_dir, job_id, &binary).await
+}
+
+async fn generate_video_with_binary(
+    req: &JobRequest,
+    out_dir: &Path,
+    job_id: &str,
+    binary: &Path,
+) -> Result<PathBuf> {
+    video_controls::validate(req)?;
     validate_video_end_image(req)?;
     tokio::fs::create_dir_all(out_dir).await.ok();
     let out_path = out_dir.join(format!("{job_id}.mp4"));
@@ -1141,21 +1201,39 @@ pub async fn generate_video(req: &JobRequest, out_dir: &Path, job_id: &str) -> R
         None
     };
 
-    let mut cmd = Command::new(resolve_mere_run_binary().await);
-    cmd.args(build_video_generate_args(
+    let args = build_video_generate_args(
         req,
         &model,
         &out_path,
         input_path.as_deref(),
         end_path.as_deref(),
         audio_path.as_deref(),
-    ));
-
-    let output = cmd.output().await?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("mere.run video generate failed: {}", stderr.trim()));
+    );
+    if !video_controls::one_shot(req) {
+        if let Some(request) = crate::resident_video::request(
+            req,
+            &model,
+            job_id,
+            &out_path,
+            input_path.as_deref(),
+            end_path.as_deref(),
+        ) {
+            if crate::resident_video::generate(binary, &request, &out_path)
+                .await?
+                .is_some()
+            {
+                return Ok(out_path);
+            }
+        }
     }
+    crate::resident_video::close().await;
+    if req.preflight_required == Some(true) {
+        video_controls::preflight(binary, &args).await?;
+    }
+    let mut cmd = Command::new(binary);
+    cmd.args(args);
+
+    run_streaming_with_progress(cmd, None, "video").await?;
     if !out_path.exists() {
         return Err(anyhow!(
             "mere.run reported success but produced no file at {out_path:?}"
@@ -2848,6 +2926,34 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
     }
 
     #[test]
+    fn keeps_animatic_unified_av_on_the_one_shot_fallback() {
+        let req: JobRequest = serde_json::from_value(serde_json::json!({
+            "kind": "video",
+            "prompt": "the ferry departs",
+            "model": "video-ltx25-distilled-bf16",
+            "variant": "unified-av",
+            "width": 448,
+            "height": 768,
+            "duration_seconds": 5,
+        }))
+        .expect("video job");
+        let args = build_video_generate_args(
+            &req,
+            "video-ltx25-distilled-bf16",
+            Path::new("/tmp/ferry.mp4"),
+            None,
+            None,
+            None,
+        );
+        let rendered: Vec<String> = args
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let variant_at = rendered.iter().position(|arg| arg == "--variant").unwrap();
+        assert_eq!(rendered[variant_at + 1], "unified-av");
+    }
+
+    #[test]
     fn builds_video_generate_args_with_end_keyframe() {
         let req: JobRequest = serde_json::from_value(serde_json::json!({
             "kind": "video",
@@ -3299,6 +3405,133 @@ sfx-woosh-flow                   sfx             installed  5 GB"#,
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn dropping_image_execution_terminates_its_subprocess() {
+        use std::time::Duration;
+        let pid_file =
+            std::env::temp_dir().join(format!("mere-image-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_file(&pid_file);
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("echo $$ > \"$1\"; exec sleep 30")
+            .arg("image-test")
+            .arg(&pid_file);
+        let task =
+            tokio::spawn(async move { run_streaming_with_progress(command, None, "image").await });
+        let pid = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&pid_file).await {
+                    if let Ok(pid) = text.trim().parse::<i32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("image subprocess never started");
+        task.abort();
+        let _ = task.await;
+        let stopped = tokio::time::timeout(Duration::from_secs(2), async {
+            while unsafe { libc::kill(pid, 0) } == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        // Clean up the known test child even when exercising the broken implementation.
+        if !stopped {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        let _ = tokio::fs::remove_file(pid_file).await;
+        assert!(
+            stopped,
+            "canceling image execution left the generation subprocess running"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_image_execution_terminates_descendant_processes() {
+        use std::time::Duration;
+        let dir =
+            std::env::temp_dir().join(format!("mere-image-descendant-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let started = dir.join("started");
+        let escaped = dir.join("escaped");
+        let _ = std::fs::remove_file(&started);
+        let _ = std::fs::remove_file(&escaped);
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("(sleep 0.5; echo escaped > \"$2\") & echo ready > \"$1\"; wait")
+            .arg("image-test")
+            .arg(&started)
+            .arg(&escaped);
+        let task =
+            tokio::spawn(async move { run_streaming_with_progress(command, None, "image").await });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("image subtree never started");
+        task.abort();
+        let _ = task.await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            !escaped.exists(),
+            "generation descendant survived cancellation"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn dropping_video_generation_terminates_descendants_and_late_output() {
+        use std::time::Duration;
+        let dir = std::env::temp_dir().join(format!("mere-video-cancel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let started = dir.join("started");
+        let output = dir.join("cancel-video.mp4");
+        let binary = dir.join("fake-video");
+        let _ = std::fs::remove_file(&started);
+        let _ = std::fs::remove_file(&output);
+        write_fake_cli(
+            &binary,
+            &format!(
+                "#!/bin/sh\n(sleep 0.5; echo late > '{}') & echo ready > '{}'; wait\n",
+                output.display(),
+                started.display(),
+            ),
+        );
+        let task_dir = dir.clone();
+        let task = tokio::spawn(async move {
+            let mut req = image_job_request();
+            req.kind = JobKind::Video;
+            req.model = Some("video-one-shot-test".to_string());
+            generate_video_with_binary(&req, &task_dir, "cancel-video", &binary).await
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("video subtree never started");
+        task.abort();
+        let _ = task.await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let leaked = output.exists();
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(
+            !leaked,
+            "video descendant produced output after cancellation"
+        );
+    }
+
     /// End-to-end at the process boundary: a fake `mere.run` streams progress
     /// on stderr (NDJSON when advertised, `\r`-separated human text otherwise)
     /// and the node forwards deduplicated 1-based denoising steps.
@@ -3379,5 +3612,73 @@ echo "$out"
             assert_eq!(got, vec![(1, 4), (2, 4), (3, 4), (4, 4)], "{label}");
         }
         std::env::remove_var("MERERUN_BIN");
+    }
+    #[test]
+    fn video_steps_are_forwarded_exactly() {
+        let req: JobRequest = serde_json::from_value(
+            serde_json::json!({"kind":"video","prompt":"test","width":512,"height":320,"steps":8}),
+        )
+        .unwrap();
+        let args = build_video_generate_args(
+            &req,
+            "video-test",
+            Path::new("/tmp/test.mp4"),
+            None,
+            None,
+            None,
+        );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--steps" && pair[1] == "8"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn video_required_preflight_and_policy_fail_closed_before_generation() {
+        use std::os::unix::fs::PermissionsExt;
+        for (index, extra) in [
+            serde_json::json!({"preflight_required":true}),
+            serde_json::json!({"memory_policy":"conservative"}),
+            serde_json::json!({"max_oom_retries":1}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dir = std::env::temp_dir()
+                .join(format!("video-control-red-{}-{index}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let binary = dir.join("fake-runtime");
+            std::fs::write(
+                &binary,
+                r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = '--preflight' ]; then
+    echo '{"schema_version":1,"command":["video","generate"],"mode":"preflight","status":"blocked"}'
+    exit 0
+  fi
+done
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '--output' ]; then shift; touch "$1"; fi
+  shift
+done
+"#,
+            )
+            .unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut value = serde_json::json!({"kind":"video","prompt":"test","width":512,"height":320,"model":"video-test","steps":8});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let req = serde_json::from_value(value).unwrap();
+            let outcome = generate_video_with_binary(&req, &dir, "job", &binary).await;
+            let produced = dir.join("job.mp4").exists();
+            std::fs::remove_dir_all(&dir).unwrap();
+            assert!(
+                outcome.is_err(),
+                "case {index} ran without supported controls"
+            );
+            assert!(!produced, "case {index} generated despite rejection");
+        }
     }
 }

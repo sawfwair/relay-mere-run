@@ -72,11 +72,14 @@ function supportsRequestedModelOrMarker(
 }
 
 export function supportsJob(info: AgentInfo, job: Job): boolean {
+  if (job.required_device_id && info.device_id !== job.required_device_id) return false;
+  if (job.required_device_id && job.request.model?.trim() && !agentHasModel(info, job.request.model)) return false;
   const kind = inferJobKind(job);
   if (kind === 'music') {
     return supportsRequestedModelOrMarker(info, job.request.model, 'music', 'music-');
   }
   if (kind === 'video') {
+    if (job.request.video_controls_version === 1 && info.capabilities.video_request_controls !== 1) return false;
     return supportsRequestedModelOrMarker(info, job.request.model, 'video', 'video-');
   }
 
@@ -440,6 +443,7 @@ function anyCapableAgent(
 }
 
 export function hasCapableAgentForJob(ctx: RelayContext, job: Job): boolean {
+  if (job.required_device_id && job.user_id !== ctx.userId) return false;
   return anyCapableAgent(ctx, (info) => supportsJob(info, job));
 }
 
@@ -870,7 +874,7 @@ async function sendGraphToAgent(
   agent: ConnectedAgentRecord
 ): Promise<boolean> {
   // A disconnected previous attempt must not keep a usable upload capability.
-  if (hasLocalCustody(graph)) graph.node_token = crypto.randomUUID().replaceAll('-', '');
+  graph.node_token = crypto.randomUUID().replaceAll('-', '');
   const message: GraphRequestMessage = {
     type: 'graph_request',
     job_id: graph.job_id,
@@ -878,8 +882,8 @@ async function sendGraphToAgent(
     owner_user_id: graph.user_id,
     bundle_files: await materializeRelayBundle(ctx, graph),
     upload_url_base: graphUploadUrlBase(graph),
-    ...(hasLocalCustody(graph) ? { data_policy: graph.job.data_policy, request_sha256: graph.request_sha256,
-      assignment_token: graph.node_token } : {}),
+    assignment_token: graph.node_token,
+    ...(hasLocalCustody(graph) ? { data_policy: graph.job.data_policy, request_sha256: graph.request_sha256 } : {}),
   };
 
   try {
@@ -905,6 +909,7 @@ export async function assignJobToAgent(
   job: Job,
   preferredAgentId?: string
 ): Promise<boolean> {
+  if (job.required_device_id && job.user_id !== ctx.userId) return false;
   const model = job.request.model?.trim() || inferJobKind(job);
   const agent = await getOnlineAgent(ctx, (info) => supportsJob(info, job), model, preferredAgentId);
   if (!agent) {

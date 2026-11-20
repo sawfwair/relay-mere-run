@@ -8,6 +8,7 @@ export interface Env {
   MERE_RUN_WEB_URL: string;
   MERE_RUN_ASSET_BASE_URL: string;
   BROKER_ORIGIN: string;
+  AUTH_INTERNAL_TOKEN?: string | { get(): Promise<string> };
   // Plain string when set as a var/worker-secret; a Secrets Store binding hands
   // over a { get() } accessor instead — signWebhookPayload() resolves both.
   WEBHOOK_SIGNING_SECRET: string | { get(): Promise<string> };
@@ -26,6 +27,8 @@ export interface Env {
 
 // Agent capabilities reported on connect
 export interface AgentCapabilities {
+  video_request_controls?: 1;
+  hosting?: { kind: 'workstation' | 'runpod' | 'other' | 'unknown'; source: 'owner-declared'; label?: string };
   models: string[];
   max_resolution: number;
   controlnet: boolean;
@@ -317,6 +320,10 @@ export interface AgentInfo {
 
 // Generation request parameters
 export interface JobRequest {
+  video_controls_version?: 1;
+  memory_policy?: string;
+  preflight_required?: boolean;
+  max_oom_retries?: 0;
   kind?: 'image' | 'music' | 'video';
   prompt: string;
   negative_prompt: string | null;
@@ -331,6 +338,12 @@ export interface JobRequest {
   // --ref-image. Distinct from input_image_* (img2img). URLs the agent fetches.
   reference_image_urls: string[] | null;
   model?: string;
+  variant?: 'distilled' | 'unified-av';
+  guidance_scale?: number;
+  shift?: number;
+  adapter_selections?: Array<Record<string, unknown>>;
+  continuity?: { mode: string; [key: string]: unknown };
+  keyframes?: Array<{ time_seconds: number; prompt?: string; image_url?: string; [key: string]: unknown }>;
   duration_seconds?: number;
   fps?: number;
   num_frames?: number;
@@ -349,6 +362,8 @@ export interface JobRequest {
 
 // Job tracked by relay
 export interface Job {
+  /** Hard placement constraint retained across queued/recovered attempts. */
+  required_device_id?: string;
   job_id: string;
   user_id: string;
   client_id: string;
@@ -966,6 +981,10 @@ export type RelayMessage =
 
 // HTTP API request/response types
 export interface SubmitJobRequest {
+  memory_policy?: string;
+  preflight_required?: boolean;
+  max_oom_retries?: 0;
+  required_device_id?: string;
   kind?: 'image' | 'music' | 'video';
   prompt: string;
   negative_prompt?: string;
@@ -981,6 +1000,12 @@ export interface SubmitJobRequest {
   webhook_url?: string;
   direct_image?: boolean; // if true, return base64 instead of R2 URL
   model?: string;
+  variant?: 'distilled' | 'unified-av';
+  guidance_scale?: number;
+  shift?: number;
+  adapter_selections?: Array<Record<string, unknown>>;
+  continuity?: { mode: string; [key: string]: unknown };
+  keyframes?: Array<{ time_seconds: number; prompt?: string; image_url?: string; [key: string]: unknown }>;
   duration_seconds?: number;
   fps?: number;
   num_frames?: number;
@@ -998,8 +1023,11 @@ export type SubmitVideoRequest = SubmitJobRequest;
 export type SubmitMusicRequest = SubmitJobRequest;
 
 export interface StatusResponse {
+  video_request_controls?: 1;
+  placement_constraints?: string[];
   agents: Array<{
     agent_id: string;
+    device_id?: string;
     device_name: string;
     status: 'online' | 'busy' | 'offline';
     last_seen: string;
@@ -1018,6 +1046,7 @@ export interface SubmitJobResponse {
 }
 
 export interface JobStatusResponse {
+  required_device_id?: string;
   job_id: string;
   user_id: string;
   client_id: string;

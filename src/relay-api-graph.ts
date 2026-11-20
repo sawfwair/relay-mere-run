@@ -9,7 +9,6 @@ import type {
   SubmitGraphJobRequest,
 } from './types';
 import { parseJson } from './json';
-import { runManifestSchema } from './contracts/graph';
 import { unknownJsonSchema } from './contracts/responses';
 import {
   assignGraphToAgent,
@@ -27,6 +26,7 @@ import {
 } from './relay-graph-operations';
 import {
   graphArtifactResponse,
+  graphArtifactObjectName,
   graphAssetKey,
   graphBundleObject,
   graphRunManifestKey,
@@ -41,6 +41,7 @@ import {
 import { buildGraphReceipt } from './relay-receipts';
 import { custodyArtifactAllowed, custodyPayloadState, custodySubmissionError, hasLocalCustody, matchesCustodyAssignment,
   restoreGraphPayload, sanitizedGraphEvent, sanitizedRunManifest } from './relay-graph-custody';
+import { handlePublicGraphPublication, mergePublications, retainedPublications, saveGraphArtifactUpload } from './relay-graph-publication';
 import { handleCustodyNodeRequest } from './relay-graph-custody-http';
 import { graphRequestContent, sanitizedTerminalError, sha256Json } from './execution';
 
@@ -738,7 +739,7 @@ export async function handleRetryGraphJob(ctx: RelayContext, jobId: string): Pro
   job.updated_at = new Date().toISOString();
   job.events = [];
   job.last_event_sequence = -1;
-  job.artifacts = [];
+  job.artifacts = retainedPublications(job);
   job.run_manifest = null;
   job.metrics = null;
   await ctx.saveGraphJob(job);
@@ -793,9 +794,9 @@ async function graphArtifactError(ctx: RelayContext, job: GraphJob, artifacts: G
 }
 
 async function graphResultTarget(ctx: RelayContext, job: GraphJob, token: string): Promise<GraphJob | null> {
-  if (!hasLocalCustody(job)) return job;
   const current = await ctx.getGraphJob(job.job_id);
-  return current && current.node_token === token && current.agent_id && current.payload_delivered_at
+  return current && current.node_token === token && current.agent_id
+    && (!hasLocalCustody(current) || current.payload_delivered_at)
     && ['assigned', 'preflighting', 'running'].includes(current.state) ? current : null;
 }
 
@@ -866,7 +867,7 @@ export async function handleGraphResult(
   // result overwrite cancellation, a new assignment, or its terminal receipt.
   const current = await graphResultTarget(ctx, job, assignmentToken);
   if (!current) return;
-  Object.assign(current, completion, { execution_receipt: executionReceipt });
+  Object.assign(current, completion, { artifacts: mergePublications(current, message.artifacts), execution_receipt: executionReceipt });
   releaseAgent(ctx, current.agent_id);
   if (!hasLocalCustody(current)) await ctx.env.IMAGES.put(
     graphRunManifestKey(current.user_id, current.job_id),
@@ -928,15 +929,8 @@ export async function handleGraphNodeRequest(
     if (!object) return Response.json({ error: 'Bundle file not found' }, { status: 404 });
     return new Response(object.body, { headers: { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream' } });
   }
-  if (action === 'run-manifest' && request.method === 'PUT') {
-    const bytes = await request.arrayBuffer();
-    let manifest: Record<string, unknown>;
-    try { manifest = parseJson(new TextDecoder().decode(bytes), runManifestSchema); } catch { return Response.json({ error: 'Invalid run manifest JSON' }, { status: 400 }); }
-    job.run_manifest = manifest;
-    await ctx.env.IMAGES.put(graphRunManifestKey(job.user_id, job.job_id), bytes, { httpMetadata: { contentType: 'application/json' } });
-    await ctx.saveGraphJob(job);
-    return Response.json({ stored: true });
-  }
+  const publication = await handlePublicGraphPublication(ctx, job, action, request);
+  if (publication) return publication;
   if (action.startsWith('artifact-uploads/') && request.method === 'GET') {
     const digest = decodeURIComponent(action.slice('artifact-uploads/'.length));
     if (!DIGEST_PATTERN.test(digest)) {
@@ -997,13 +991,11 @@ export async function handleGraphNodeRequest(
         return Response.json({ error: 'Graph artifact parts exceed declared size' }, { status: 400 });
       }
       await storeGraphArtifactPart(ctx, job, sha256, partIndex, partSha256, bytes);
-      job.artifact_uploads[sha256] = {
-        sha256,
-        size_bytes: size,
-        part_count: partCount,
-        parts: nextParts.sort((left, right) => left.index - right.index),
-      };
-      await ctx.saveGraphJob(job);
+      const upload = { sha256, size_bytes: size, part_count: partCount,
+        parts: nextParts.sort((left, right) => left.index - right.index) };
+      if (!await saveGraphArtifactUpload(ctx, jobId, token, artifact, upload)) {
+        return Response.json({ error: 'Graph assignment changed' }, { status: 409 });
+      }
       await recordGraphTelemetry(ctx, {
         artifact_bytes_received: bytes.byteLength,
         artifact_parts_received: 1,
@@ -1016,9 +1008,10 @@ export async function handleGraphNodeRequest(
     const bytes = await request.arrayBuffer();
     if (bytes.byteLength !== size || await sha256Hex(bytes) !== sha256) return Response.json({ error: 'Graph artifact verification failed' }, { status: 400 });
     await storeGraphArtifact(ctx, job, artifact, bytes);
-    job.artifact_uploads ??= {};
-    job.artifact_uploads[sha256] = { sha256, size_bytes: size, object_name: name, part_count: 0, parts: [] };
-    await ctx.saveGraphJob(job);
+    const upload = { sha256, size_bytes: size, object_name: graphArtifactObjectName(job, artifact), part_count: 0, parts: [] };
+    if (!await saveGraphArtifactUpload(ctx, jobId, token, artifact, upload)) {
+      return Response.json({ error: 'Graph assignment changed' }, { status: 409 });
+    }
     await recordGraphTelemetry(ctx, { artifact_bytes_received: bytes.byteLength });
     return Response.json({ stored: true, name });
   }
@@ -1037,6 +1030,8 @@ export async function handleGetGraphRunManifest(ctx: RelayContext, jobId: string
   if (hasLocalCustody(job)) return job.run_manifest
     ? Response.json(job.run_manifest, { headers: { 'Cache-Control': 'no-store' } })
     : Response.json({ error: 'Run manifest not found' }, { status: 404 });
+  if (job.run_manifest) return Response.json(job.run_manifest, { headers: { 'Cache-Control': 'no-store' } });
+  if (job.attempt > 1) return Response.json({ error: 'Run manifest not found' }, { status: 404 });
   const object = await ctx.env.IMAGES.get(graphRunManifestKey(job.user_id, job.job_id));
   return object ? new Response(object.body, { headers: { 'Content-Type': 'application/json' } }) : Response.json({ error: 'Run manifest not found' }, { status: 404 });
 }

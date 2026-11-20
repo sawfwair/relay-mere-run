@@ -72,22 +72,39 @@ impl DeviceWorkGate {
     }
 
     pub async fn acquire(&self, source: &str, work_id: &str) -> WorkPermit {
-        let permit = self
-            .semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("device work gate never closes");
-        let state = WorkGateState {
-            busy: true,
-            accepting: self.state.borrow().accepting,
-            source: source.to_string(),
-            work_id: work_id.to_string(),
-        };
-        self.state.send_replace(state);
-        WorkPermit {
-            gate: self.clone(),
-            _permit: permit,
+        let mut updates = self.subscribe();
+        loop {
+            while !updates.borrow_and_update().accepting {
+                updates
+                    .changed()
+                    .await
+                    .expect("device work gate never closes");
+            }
+            let permit = self
+                .semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("device work gate never closes");
+            let accepted = self.state.send_if_modified(|state| {
+                if !state.accepting {
+                    return false;
+                }
+                *state = WorkGateState {
+                    busy: true,
+                    accepting: true,
+                    source: source.to_string(),
+                    work_id: work_id.to_string(),
+                };
+                true
+            });
+            if accepted {
+                return WorkPermit {
+                    gate: self.clone(),
+                    _permit: permit,
+                };
+            }
+            drop(permit);
         }
     }
 
@@ -96,16 +113,21 @@ impl DeviceWorkGate {
             return None;
         }
         let permit = self.semaphore.clone().try_acquire_owned().ok()?;
-        if !self.is_accepting() {
+        let accepted = self.state.send_if_modified(|state| {
+            if !state.accepting {
+                return false;
+            }
+            *state = WorkGateState {
+                busy: true,
+                accepting: true,
+                source: source.to_string(),
+                work_id: work_id.to_string(),
+            };
+            true
+        });
+        if !accepted {
             return None;
         }
-        let state = WorkGateState {
-            busy: true,
-            accepting: true,
-            source: source.to_string(),
-            work_id: work_id.to_string(),
-        };
-        self.state.send_replace(state);
         Some(WorkPermit {
             gate: self.clone(),
             _permit: permit,
@@ -169,6 +191,24 @@ mod tests {
         gate.resume();
         assert!(!gate.current().busy);
         assert!(gate.is_accepting());
+    }
+
+    #[tokio::test]
+    async fn queued_acquire_does_not_start_during_drain() {
+        let gate = DeviceWorkGate::default();
+        let active = gate.acquire("relay", "active").await;
+        let queued_gate = gate.clone();
+        let queued = tokio::spawn(async move { queued_gate.acquire("relay", "queued").await });
+        tokio::task::yield_now().await;
+        gate.begin_drain();
+        drop(active);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            !queued.is_finished(),
+            "queued work must not start while draining"
+        );
+        gate.resume();
+        drop(queued.await.unwrap());
     }
 
     #[test]

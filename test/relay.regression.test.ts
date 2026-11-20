@@ -17,6 +17,7 @@ import {
   submitTalk,
   submitTool,
   waitForWebSocketJson,
+  relayAssetUrl,
 } from './helpers';
 
 type JsonRecord = Record<string, unknown>;
@@ -52,6 +53,41 @@ afterEach(() => {
 });
 
 describe('relay regressions', () => {
+  it('forwards Animatic video controls to the assigned Node', async () => {
+    const userId = newUserId('video-controls');
+    const { relay, ws } = await connectAgent(
+      userId,
+      { ...capabilitiesWithModels(['video-ltx25-distilled-bf16']), video_request_controls: 1 }
+    );
+    try {
+      const controls = {
+        variant: 'unified-av' as const,
+        guidance_scale: 1,
+        shift: 1,
+        adapter_selections: [{ id: 'character-look' }],
+        continuity: { mode: 'windowed', window_seconds: 5, overlap_seconds: 1 },
+        keyframes: [{ time_seconds: 2, prompt: 'the ferry departs' }],
+      };
+      const response = await submitJob(relay, userId, {
+        kind: 'video',
+        prompt: 'the ferry departs',
+        model: 'video-ltx25-distilled-bf16',
+        width: 768,
+        height: 448,
+        steps: 8,
+        duration_seconds: 5,
+        fps: 24,
+        ...controls,
+      });
+      expect(response.status).toBe(200);
+      const message = await waitForWebSocketJson<JsonRecord>(ws);
+      expect(message.type).toBe('job');
+      expect(message.request).toMatchObject(controls);
+    } finally {
+      closeWebSocket(ws);
+    }
+  });
+
   it('accepts oversized inventory updates without losing tool placement or the durable graph catalog', async () => {
     const userId = newUserId('inventory-attachment');
     const { relay, ws } = await connectAgent(userId, capabilitiesWithModels([]));
@@ -462,14 +498,14 @@ describe('relay regressions', () => {
         path: '/api/music',
         capability: 'music',
         contentType: 'audio/wav',
-        mediaUrl: 'https://assets.example/song.wav',
+        file: 'song.wav',
       },
       {
         label: 'video',
         path: '/api/video',
         capability: 'video',
         contentType: 'video/mp4',
-        mediaUrl: 'https://assets.example/clip.mp4',
+        file: 'clip.mp4',
       },
     ] as const;
 
@@ -500,7 +536,7 @@ describe('relay regressions', () => {
             type: 'result',
             job_id: jobId,
             success: true,
-            media_url: target.mediaUrl,
+            media_url: relayAssetUrl(userId, target.file),
             content_type: target.contentType,
             output_kind: target.label,
             generation_time_ms: 25,
@@ -515,7 +551,7 @@ describe('relay regressions', () => {
           );
           const statusJson = await readJson<JobStatusResponse>(statusResponse);
           expect(statusJson.status).toBe('complete');
-          expect(statusJson.result?.media_url).toBe(target.mediaUrl);
+          expect(statusJson.result?.media_url).toBe(relayAssetUrl(userId, target.file));
           expect(statusJson.result?.content_type).toBe(target.contentType);
           expect(statusJson.result?.output_kind).toBe(target.label);
         });
@@ -991,7 +1027,7 @@ describe('relay regressions', () => {
           type: 'result',
           job_id: jobId,
           success: true,
-          image_url: 'https://example.com/image.png',
+          image_url: relayAssetUrl(userId, 'image.png'),
           seed: 1337,
           generation_time_ms: 42,
         })
@@ -1046,7 +1082,7 @@ describe('relay regressions', () => {
           type: 'result',
           job_id: jobId,
           success: true,
-          image_url: 'https://example.com/image.png',
+          image_url: relayAssetUrl(userId, 'image.png'),
           seed: 9,
           generation_time_ms: 12,
         })
@@ -1104,7 +1140,7 @@ describe('relay regressions', () => {
           type: 'result',
           job_id: jobId,
           success: true,
-          image_url: 'https://example.com/image.png',
+          image_url: relayAssetUrl(userId, 'image.png'),
           seed: 1,
           generation_time_ms: 7,
         })
@@ -1156,7 +1192,7 @@ describe('relay regressions', () => {
           type: 'result',
           job_id: jobId,
           success: true,
-          image_url: 'https://example.com/image.png',
+          image_url: relayAssetUrl(userId, 'image.png'),
           seed: 1,
           generation_time_ms: 7,
         })
@@ -1538,7 +1574,7 @@ describe('relay regressions', () => {
         type: 'talk_response',
         talk_id: id,
         owner_user_id: userId,
-        audio_url: 'https://example.com/audio.wav',
+        audio_url: relayAssetUrl(userId, `${id}.wav`),
         duration_seconds: 1.2,
         sample_rate: 24000,
         output_format: 'wav',

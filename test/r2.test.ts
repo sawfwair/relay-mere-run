@@ -21,6 +21,7 @@ import {
   getPublicJobOutputUrl,
   getPublicToolArtifactUrl,
   getToolArtifactKey,
+  isAccountAssetUrl,
   storeAudio,
   storeImage,
   storeJobOutput,
@@ -111,5 +112,37 @@ describe('R2 media contracts', () => {
       .resolves.toContain('/result.md');
     await expect(storeToolArtifact(env, 'r2-test', `fallback-${suffix}`, 'result', bytes, ''))
       .resolves.toContain('/result.png');
+  });
+
+  it('accepts as a result URL only what the relay issued for that account', () => {
+    const issued = [
+      getPublicImageUrl(env, 'user-a', 'job-1'),
+      getPublicJobOutputUrl(env, 'user-a', 'job-1', 'video/mp4'),
+      getPublicToolArtifactUrl(env, 'user-a', 'tool-1', 'report', 'application/json'),
+      getPublicAudioUrl(env, 'user-a', 'talk-1'),
+    ];
+    for (const url of issued) {
+      expect(isAccountAssetUrl(env, 'user-a', url)).toBe(true);
+      // Another account's stored object is not this account's result.
+      expect(isAccountAssetUrl(env, 'user-b', url)).toBe(false);
+    }
+
+    const base = buildAssetUrl(env, '');
+    const refused = [
+      'https://attacker.example/relay/user-a/job-1.png',
+      'http://169.254.169.254/latest/meta-data',
+      'data:image/png;base64,AAAA',
+      `${base}relay/user-a/`,
+      `${base}relay/user-a/../user-b/job-1.png`,
+      `${base}relay/user-a/job-1.png?redirect=https://attacker.example`,
+      `${base}relay/user-a/job-1.png#fragment`,
+      `${base}relay/user-a//job-1.png`,
+      `${base}relay/user-a/job 1.png`,
+      `${base}inputs/user-a/job-1.jpg`,
+      `${base.replace('://', '://evil.')}relay/user-a/job-1.png`,
+      '',
+    ];
+    expect(refused.filter((url) => isAccountAssetUrl(env, 'user-a', url))).toEqual([]);
+    expect(isAccountAssetUrl(env, '', `${base}relay//job-1.png`)).toBe(false);
   });
 });

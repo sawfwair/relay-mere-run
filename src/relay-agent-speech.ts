@@ -11,6 +11,7 @@ import {
 } from './relay-lifecycle';
 import { TERMINAL_RETAIN_MS } from './relay-agent-common';
 import { durationMs, recordNodePerformance } from './relay-fleet';
+import { isAccountAssetUrl, NOT_RELAY_ASSET_ERROR } from './r2';
 
 export async function handleTalkResponse(
   ctx: RelayContext,
@@ -29,6 +30,13 @@ export async function handleTalkResponse(
   }
   if (talk.status === 'cancelled') {
     console.log(`Ignoring late talk response for cancelled talk ${msg.talk_id}`);
+    return;
+  }
+
+  // The audio URL must be the stored object the relay returned from upload.
+  if (msg.audio_url && !isAccountAssetUrl(ctx.env, talk.user_id, msg.audio_url)) {
+    console.warn(`Rejecting response for talk ${msg.talk_id}: audio URL is not a relay asset of the talk owner`);
+    await handleTalkError(ctx, { type: 'talk_error', talk_id: msg.talk_id, owner_user_id: msg.owner_user_id, error: NOT_RELAY_ASSET_ERROR });
     return;
   }
 

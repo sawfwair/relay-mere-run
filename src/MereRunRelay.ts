@@ -52,6 +52,21 @@ export class MereRunRelay extends DurableObject<Env> {
   private graphJobs: Map<string, GraphJob> = new Map();
   private userId = '';
 
+  private async restoreOwner(request?: Request): Promise<boolean> {
+    const supplied = request?.headers.get('X-User-Id') || '';
+    const retained = this.userId || await this.ctx.storage.get<string>('relay:owner') || '';
+    const owner = retained || supplied;
+    // The public Worker chooses this account-scoped DO from the verified subject.
+    // Never let a forged internal header bind another account to this object.
+    if (owner && this.env.MERE_RUN_RELAY.idFromName(owner).toString() !== this.ctx.id.toString()) return false;
+    if (supplied && supplied !== owner) return false;
+    if (owner) {
+      if (!retained) await this.ctx.storage.put('relay:owner', owner);
+      this.userId = owner;
+    }
+    return true;
+  }
+
   private async getJob(jobId: string): Promise<Job | undefined> {
     let job = this.jobs.get(jobId);
     if (!job) {
@@ -215,8 +230,8 @@ export class MereRunRelay extends DurableObject<Env> {
 
   private prepareJobForStorage(job: Job): Job {
     const jobToStore = { ...job };
-    if (jobToStore.result?.image_data) {
-      jobToStore.result = { ...jobToStore.result, image_data: undefined };
+    if (jobToStore.result) {
+      jobToStore.result = { ...jobToStore.result, image_data: undefined, media_data: undefined };
     }
     if (jobToStore.request.input_image_data) {
       jobToStore.request = { ...jobToStore.request, input_image_data: null };
@@ -288,8 +303,14 @@ export class MereRunRelay extends DurableObject<Env> {
   }
 
   async fetch(request: Request): Promise<Response> {
+    if (!(await this.restoreOwner(request))) {
+      return Response.json({ error: 'Account does not own this Relay', code: 'OWNER_SCOPE_MISMATCH' }, { status: 403 });
+    }
     const relayContext = this.createRelayContext();
     const url = new URL(request.url);
+    if ((url.pathname === '/agent' || url.pathname === '/zero-agent') && !request.headers.get('X-User-Id')) {
+      return Response.json({ error: 'Account identity is required', code: 'OWNER_SCOPE_MISMATCH' }, { status: 403 });
+    }
     if (url.pathname === '/internal/asr/stream-ticket' && request.method === 'POST') {
       return createAsrStreamTicket(relayContext, request);
     }
@@ -300,6 +321,10 @@ export class MereRunRelay extends DurableObject<Env> {
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (!(await this.restoreOwner())) {
+      ws.close(4003, 'Account scope mismatch');
+      return;
+    }
     const relayContext = this.createRelayContext();
     const attachment = ws.deserializeAttachment() as AnyWebSocketAttachment | null;
     if (isAsrBrowserWebSocketAttachment(attachment)) {
@@ -310,6 +335,7 @@ export class MereRunRelay extends DurableObject<Env> {
   }
 
   async webSocketClose(ws: WebSocket): Promise<void> {
+    if (!(await this.restoreOwner())) return;
     const relayContext = this.createRelayContext();
     const attachment = ws.deserializeAttachment() as AnyWebSocketAttachment | null;
     if (isAsrBrowserWebSocketAttachment(attachment)) {
@@ -320,6 +346,7 @@ export class MereRunRelay extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    if (!(await this.restoreOwner())) return;
     const relayContext = this.createRelayContext();
     await handleGraphMaintenanceAlarm(relayContext);
     await handleWebhookAlarm(relayContext);

@@ -15,7 +15,7 @@ const grant: RelayExecutionGrant = {
 const execution = grant.executions[0];
 const now = () => Math.floor(Date.now() / 1000);
 const claims = (): JWTPayload => ({ sub: 'owner', iat: now(), exp: now() + 300,
-  client_id: 'example-app', azp: 'example-app', scope: 'relay:graph-execution', token_use: 'relay_execution',
+  client_id: 'you', azp: 'you', scope: 'relay:graph-execution', token_use: 'relay_execution',
   relay_execution_grant: grant });
 const body = () => ({ job: { job_id: execution.job_id, idempotency_key: execution.idempotency_key, created_at: '2026-08-27T00:00:00Z' },
   graph: { nodes: [{ id: 'execute', provider: execution.provider_id, kind: execution.node_kind }] }, inputs: { payload: {} }, assets: {} });
@@ -78,7 +78,7 @@ describe('background execution scope', () => {
     const { privateKey, publicKey } = await generateKeyPair('RS256');
     const issuer = `https://broker-${crypto.randomUUID()}.example`;
     const publicJwk = await exportJWK(publicKey);
-    vi.stubGlobal('fetch', vi.fn(() => Response.json({ keys: [{ ...publicJwk, kid: 'grant-test', alg: 'RS256', use: 'sig' }] })));
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/app/admission') ? Response.json({ allowed: true }) : Response.json({ keys: [{ ...publicJwk, kid: 'grant-test', alg: 'RS256', use: 'sig' }] })));
     const token = await new SignJWT(claims()).setIssuer(issuer).setAudience('mere-run-relay')
       .setProtectedHeader({ alg: 'RS256', kid: 'grant-test' }).sign(privateKey);
     const accounts: string[] = [];

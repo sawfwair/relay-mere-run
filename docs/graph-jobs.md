@@ -2,8 +2,9 @@
 
 The relay brokers immutable `mere.run` workflow bundles as a first-class work
 kind. Graph jobs are independent from image, media, chat, and plugin tool jobs.
-The complete graph is placed on one compatible node so intermediate artifacts
-remain local to that machine.
+The complete graph is placed on one compatible node so downstream nodes reuse
+intermediate artifacts on that machine. Hosted media previews are verified
+copies of those local files.
 
 Graphs that require private input and log custody must explicitly select
 [`local-custody.v1`](local-custody.md). That policy replaces the portable R2
@@ -152,6 +153,33 @@ full SHA-256, so final outputs and node-artifact aliases can share one upload.
 Fetch streams the ordered R2 parts as one response with the artifact's original
 content type and size, and the client verifies the complete SHA-256 after write.
 
+### Media before graph completion
+
+Node 0.2.22 publishes completed node artifacts while downstream nodes run.
+Providers can also emit `preview_ready` or `artifact_ready` events with a
+closed media file in the run directory. Intermediate frames depend on provider
+support; Node does not generate additional inference previews.
+
+Node snapshots each file, verifies its digest, uploads it, then sends
+`PUT /api/graph-node/:user/:job/:token/publications` with `artifacts` and `run_manifest`.
+Relay exposes the partial manifest and artifact downloads only after storage
+verification. A local ready event becomes a diagnostic until publication;
+clients must use the verified manifest to display hosted media.
+
+Publication uses one upload task and one pending notification. Preview
+notifications are coalesced to at most one per second. Intermediate snapshots
+are limited to 16 MiB; completed outputs use the resumable upload path. Relay
+retains at most 2,048 published artifact identities per job. An identity includes
+the node ID and SHA-256, so replacing a provider's local preview file cannot
+change an earlier download or pinned comparison.
+
+Published media remains available after failure, cancellation, and a retry of
+the same job, until normal retention expires. Each assignment rotates its upload
+token. Relay rejects publication from a superseded assignment or into a terminal
+job. A retry clears the active manifest while retaining immutable downloads.
+Local-custody jobs never start the media uploader, and Relay rejects their
+publication requests.
+
 Automatic recovery requeues a disconnected assignment for at most one retry.
 An explicit retry creates another attempt against the same immutable bundle;
 materialized seeds therefore remain unchanged.
@@ -209,3 +237,19 @@ quotas, and stale-work reconciliation. The Rust simulator starts a loopback
 relay server and a temporary fake `mere.run` worker, then drives the production
 node code through verified bundle download, NDJSON forwarding, artifact and
 manifest upload, workspace cleanup, and cooperative cancellation.
+
+### Check early delivery with installed models
+
+The opt-in Node acceptance test runs an exported graph with real inference
+against a loopback Relay fixture. Use an image node followed by a video node
+with a short execution timeout. The test requires a real PNG upload before the
+downstream failure and saves the image, partial manifest, and timing evidence.
+It does not establish production end-to-end delivery.
+
+```sh
+GRAPH_MEDIA_ACCEPTANCE_BUNDLE=/absolute/path/to/exported-bundle \
+GRAPH_MEDIA_ACCEPTANCE_EVIDENCE=/absolute/path/to/evidence \
+GRAPH_MEDIA_ACCEPTANCE_RUNTIME=/absolute/path/to/mere.run \
+  cargo test --manifest-path node/src-tauri/Cargo.toml \
+    graph_simulator_real_inference --locked -- --ignored --nocapture
+```
