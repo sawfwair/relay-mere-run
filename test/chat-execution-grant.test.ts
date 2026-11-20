@@ -95,8 +95,12 @@ describe('single-execution background chat authorization', () => {
     const { privateKey, publicKey } = await generateKeyPair('RS256');
     const issuer = `https://broker-${crypto.randomUUID()}.example`;
     const jwk = await exportJWK(publicKey);
-    vi.stubGlobal('fetch', vi.fn(() => Response.json({ keys: [{ ...jwk, kid: 'chat-grant', alg: 'RS256', use: 'sig' }] })));
-    const token = await new SignJWT({ ...claims, sub: userId }).setIssuer(issuer).setAudience('mere-run-relay')
+    // Every Relay token is admitted against the broker for its source app, so the
+    // grant names an app Relay knows and the broker says the account may use it.
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/app/admission')
+      ? Response.json({ allowed: true })
+      : Response.json({ keys: [{ ...jwk, kid: 'chat-grant', alg: 'RS256', use: 'sig' }] })));
+    const token = await new SignJWT({ ...claims, sub: userId, client_id: 'you', azp: 'you' }).setIssuer(issuer).setAudience('mere-run-relay')
       .setProtectedHeader({ alg: 'RS256', kid: 'chat-grant' }).sign(privateKey);
     const workerEnv = { ...env, BROKER_ORIGIN: issuer } as Env;
     const call = (path: string, method = 'GET', input?: unknown) => worker.fetch(new Request(req(path, method, input), {
