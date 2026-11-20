@@ -98,6 +98,11 @@ function ensureWebSocketBuffer(ws: WebSocket): void {
   });
 }
 
+/** The URL the relay returns from upload for an account's stored output: the only result URL a node may report. */
+export function relayAssetUrl(userId: string, name: string): string {
+  return `${env.MERE_RUN_ASSET_BASE_URL.replace(/\/+$/, '')}/relay/${userId}/${name}`;
+}
+
 export function getRelay(userId: string): DurableObjectStub {
   const id = env.MERE_RUN_RELAY.idFromName(userId);
   return env.MERE_RUN_RELAY.get(id);

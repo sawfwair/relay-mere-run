@@ -117,3 +117,20 @@ for every paired device — this happened on 2026-08-17 and was recovered with
 contains placeholder markers; production deploys set `WRANGLER_CONFIG` to a
 private, uncommitted configuration (reconstructable from the live version via
 `wrangler versions view <id>`, which lists every var and binding).
+
+## A result URL is only ever a relay-stored object of the work's owner
+
+A node uploads its output to the relay, receives the stored object's URL, and
+reports that URL in its result. The relay now accepts a URL in a job result, a
+talk response, or a tool artifact only when it is under
+`MERE_RUN_ASSET_BASE_URL` and inside the owner's `relay/<user id>/` key space,
+with no query, fragment, or path traversal (`isAccountAssetUrl` in `src/r2.ts`).
+Anything else fails the work with "Result URL was not issued by this relay."
+
+Before this, the URL was passed through as the node sent it, so a node could
+make the relay present any address to the work's owner and to their webhook
+receiver as a stored result, and a receiver that downloads results would fetch
+it. Inline `image_data`, `media_data`, and `audio_data` are unaffected. A node
+that reports a URL from a different asset base than the relay is configured
+with (for example after `MERE_RUN_ASSET_BASE_URL` changes mid-run) will have
+that result rejected.
