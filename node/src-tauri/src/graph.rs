@@ -94,6 +94,7 @@ pub async fn probe() -> Option<GraphWorkerCapabilities> {
         _ => None,
     };
     capabilities.cached_asset_digests = cached_asset_digests().await;
+    capabilities.assignment_tokens = true;
     capabilities.data_policies = vec![graph_custody::POLICY.to_string()];
     Some(capabilities)
 }

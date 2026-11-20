@@ -21,8 +21,10 @@ import {
   handleRelayWebSocketMessage,
   handleRelayWebSocketClose,
 } from './relay-websocket';
-import { failInProgressWorkForAgent } from './relay-lifecycle';
+import { failInProgressWork, failInProgressWorkForAgent } from './relay-lifecycle';
 import { assignQueuedWork } from './relay-queue';
+import { fillBatchWindow, settleCancelledBatches } from './relay-api-batch';
+import { storedGraphJobs } from './relay-graph-record';
 import { handleGraphMaintenanceAlarm } from './relay-graph-operations';
 import { prepareGraphForStorage } from './relay-graph-custody';
 import {
@@ -51,6 +53,9 @@ export class MereRunRelay extends DurableObject<Env> {
   private tools: Map<string, Tool> = new Map();
   private graphJobs: Map<string, GraphJob> = new Map();
   private userId = '';
+  private dispatching = false;
+  private dispatchAgain = false;
+  private hydratedGraphs = false;
 
   private async restoreOwner(request?: Request): Promise<boolean> {
     const supplied = request?.headers.get('X-User-Id') || '';
@@ -289,7 +294,7 @@ export class MereRunRelay extends DurableObject<Env> {
       saveGraphJob: (job: GraphJob) => this.saveGraphJob(job),
       prepareJobForStorage: (job: Job) => this.prepareJobForStorage(job),
       prepareTalkForStorage: (talk: Talk) => this.prepareTalkForStorage(talk),
-      assignQueuedWork: () => assignQueuedWork(relayContext),
+      assignQueuedWork: () => this.dispatchWork(),
       failInProgressWorkForAgent: (info: AgentInfo, reason: string) =>
         failInProgressWorkForAgent(relayContext, info, reason),
       scheduleJobWebhookIfNeeded: (job: Job) => scheduleJobWebhookIfNeeded(relayContext, job),
@@ -345,11 +350,47 @@ export class MereRunRelay extends DurableObject<Env> {
     await handleRelayWebSocketClose(createRelayWebSocketHandlers(relayContext), ws);
   }
 
+  private async dispatchWork(): Promise<void> {
+    if (this.dispatching) { this.dispatchAgain = true; return; }
+    this.dispatching = true;
+    try {
+      do {
+        this.dispatchAgain = false;
+        const context = this.createRelayContext();
+        if (!this.hydratedGraphs) {
+          for await (const job of storedGraphJobs(this.ctx.storage)) {
+            if (!['finished', 'failed', 'cancelled'].includes(job.state) && !this.graphJobs.has(job.job_id)) {
+              this.graphJobs.set(job.job_id, job);
+            }
+          }
+          this.hydratedGraphs = true;
+          await this.reconcileGraphAssignments(context);
+        }
+        await settleCancelledBatches(context);
+        await fillBatchWindow(context);
+        await assignQueuedWork(context);
+      } while (this.dispatchAgain);
+    } finally {
+      this.dispatching = false;
+    }
+  }
+
+  private async reconcileGraphAssignments(context: RelayContext): Promise<void> {
+    const agents = context.getConnectedAgents();
+    for (const job of this.graphJobs.values()) {
+      if (job.batch_id && job.agent_id && !agents.has(job.agent_id)
+          && ['assigned', 'running', 'preflighting'].includes(job.state)) {
+        await failInProgressWork(context, job.job_id, 'GRAPH_WORKER_DISCONNECTED', job.agent_id);
+      }
+    }
+  }
+
   async alarm(): Promise<void> {
     if (!(await this.restoreOwner())) return;
     const relayContext = this.createRelayContext();
     await handleGraphMaintenanceAlarm(relayContext);
     await handleWebhookAlarm(relayContext);
     await expireAsrStreamSessions(relayContext);
+    await this.dispatchWork();
   }
 }

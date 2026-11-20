@@ -1,3 +1,4 @@
+import { isBatchPath } from './relay-batch-routing';
 import type {
   ResultMessage,
   SubmitJobRequest,
@@ -53,6 +54,7 @@ import {
 } from './contracts/requests';
 
 export interface RelayRouteHandlers {
+  handleGraphBatchRequest(request: Request): Promise<Response>;
   acceptAgentWebSocket(request: Request): Response;
   getRequestUserId(request: Request): string;
   handleStatus(): Promise<Response>;
@@ -146,7 +148,9 @@ export async function handleRelayFetch(
   handlers: RelayRouteHandlers,
   request: Request
 ): Promise<Response> {
+  const path = new URL(request.url).pathname;
   try {
+    if (isBatchPath(path, '/internal')) return await handlers.handleGraphBatchRequest(request);
     return await handleRelayFetchUnchecked(handlers, request);
   } catch (error) {
     const response = invalidJsonResponse(error);
@@ -171,6 +175,7 @@ async function handleRelayFetchUnchecked(
   request: Request
 ): Promise<Response> {
   const url = new URL(request.url);
+
 
   if (url.pathname === '/agent' || url.pathname === '/zero-agent') {
     return handlers.acceptAgentWebSocket(request);

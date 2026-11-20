@@ -93,6 +93,18 @@ complexity lint with warnings denied and a current ceiling of 45, which must be
 lowered as hotspots are decomposed. Complexity is a maintainability signal, not
 permission to change protocol semantics solely to improve a score.
 
+## ADR-009 — Batch fan-out schedules complete immutable graph children
+
+Status: accepted
+
+The account Durable Object owns batch records and item descriptors. A bounded window
+admits ordinary graph jobs and aggregates verified outputs in item order. Each graph
+stays on one worker. Batch children require attempt-token-aware nodes and share
+quota and fair scheduling with ordinary work. Cancellation persists before child
+cleanup and remains terminal across restart. Retry reactivates failed items only
+and carries an idempotent operation key. Local-custody batches require a separate
+contract and are rejected by batch v1.
+
 ## Production deploys require a private Wrangler configuration
 
 The committed `wrangler.toml` intentionally carries placeholder identifiers

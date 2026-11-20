@@ -14,7 +14,7 @@ export function hasLocalCustody(job: Pick<GraphJob, 'job'>): boolean {
 }
 
 export function matchesCustodyAssignment(job: GraphJob, token: string | undefined): boolean {
-  if (!hasLocalCustody(job) && token === undefined) return true;
+  if (!hasLocalCustody(job) && !job.requires_assignment_token && token === undefined) return true;
   return !!job.agent_id && typeof token === 'string' && job.node_token === token;
 }
 

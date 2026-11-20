@@ -1,3 +1,5 @@
+import { graphPlacementRecord } from './relay-graph-record';
+import { withGraphAdmission } from './relay-admission';
 import type { RelayContext } from './relay-context';
 import type {
   GraphErrorMessage,
@@ -11,7 +13,6 @@ import type {
 import { parseJson } from './json';
 import { unknownJsonSchema } from './contracts/responses';
 import {
-  assignGraphToAgent,
   graphPlacementReport,
   supportsGraph,
 } from './relay-queue';
@@ -474,37 +475,7 @@ export function validateCreateRequest(body: SubmitGraphJobRequest): string | nul
 export function handlePreflightGraphJob(ctx: RelayContext, body: SubmitGraphJobRequest): Response {
   const error = validateCreateRequest(body);
   if (error) return Response.json({ error }, { status: 400 });
-  const createdAt = new Date().toISOString();
-  const graph: GraphJob = {
-    job_id: body.job.job_id,
-    user_id: ctx.userId,
-    client_id: body.client_id ?? 'graph-studio',
-    agent_id: null,
-    state: 'preflighting',
-    job: body.job,
-    graph: body.graph,
-    inputs: body.inputs,
-    assets: body.assets,
-    missing_asset_digests: [],
-    events: [],
-    artifacts: [],
-    artifact_uploads: {},
-    run_manifest: null,
-    metrics: null,
-    error: null,
-    created_at: createdAt,
-    updated_at: createdAt,
-    assigned_at: null,
-    started_at: null,
-    completed_at: null,
-    attempt: 0,
-    max_attempts: 1,
-    node_token: '',
-    relay_origin: '',
-    webhook_url: body.job.webhook_url ?? null,
-    webhook_sent: false,
-  };
-  return Response.json({ placement: graphPlacementReport(ctx, graph) }, {
+  return Response.json({ placement: graphPlacementReport(ctx, graphPlacementRecord(body, ctx.userId)) }, {
     headers: { 'Cache-Control': 'no-store' },
   });
 }
@@ -554,17 +525,30 @@ async function repeatedGraphSubmission(
 async function recoverGraphReplay(ctx: RelayContext, job: GraphJob, body: SubmitGraphJobRequest): Promise<Response> {
   if (restoreGraphPayload(job, body)) {
     await ctx.saveGraphJob(job);
-    if (job.state === 'queued') await assignGraphToAgent(ctx, job);
+
   }
   return Response.json(graphResponse(ctx, job));
 }
 
 export async function handleCreateGraphJob(
+  ctx: RelayContext, body: SubmitGraphJobRequest, userId: string, origin: string,
+  batch?: { batch_id: string; max_attempts: number },
+): Promise<Response> {
+  const response = await withGraphAdmission(ctx.storage, () => createGraphJob(ctx, body, userId, origin, batch));
+  if (response.ok && body.job.data_policy) await ctx.assignQueuedWork();
+  return response;
+}
+
+async function createGraphJob(
   ctx: RelayContext,
   body: SubmitGraphJobRequest,
   userId: string,
   origin: string,
+  batch?: { batch_id: string; max_attempts: number },
 ): Promise<Response> {
+  const batchOwner = await ctx.storage.get<string>(`batch-child:${body.job.job_id}`);
+  if (await ctx.storage.get(`batch:${body.job.job_id}`)) return Response.json({ code: 'BATCH_PARENT_ID_OWNED' }, { status: 409 });
+  if (batchOwner && batchOwner !== batch?.batch_id) return Response.json({ code: 'BATCH_CHILD_OWNED' }, { status: 409 });
   const error = validateCreateRequest(body);
   if (error) return Response.json({ error }, { status: 400 });
   const requestSha256 = await sha256Json(graphRequestContent(body));
@@ -606,6 +590,7 @@ export async function handleCreateGraphJob(
     webhook_sent: false,
     request_sha256: requestSha256,
     ...(body.job.data_policy ? { bundle_documents: body.bundle_documents, max_attempts: 3 } : {}),
+    ...(batch ? { batch_id: batch.batch_id, max_attempts: batch.max_attempts, requires_assignment_token: true } : {}),
   };
   const bundleDocuments = decodeBundleDocuments(body);
   if (bundleDocuments) await storeSubmittedBundleDocuments(ctx, graph, bundleDocuments);
@@ -650,7 +635,7 @@ export async function handleUploadGraphAsset(
   return Response.json({ digest, stored: true });
 }
 
-export async function handleCommitGraphJob(ctx: RelayContext, jobId: string): Promise<Response> {
+export async function handleCommitGraphJob(ctx: RelayContext, jobId: string, dispatch = true): Promise<Response> {
   const job = await ctx.getGraphJob(jobId);
   if (!job) return Response.json({ error: 'Graph job not found' }, { status: 404 });
   if (job.state !== 'planned') return Response.json(graphResponse(ctx, job));
@@ -660,11 +645,18 @@ export async function handleCommitGraphJob(ctx: RelayContext, jobId: string): Pr
     return Response.json({ error: 'Graph job assets are incomplete', missing_asset_digests: job.missing_asset_digests }, { status: 409 });
   }
   await materializeRelayBundle(ctx, job);
-  job.state = 'queued';
-  job.updated_at = new Date().toISOString();
-  await ctx.saveGraphJob(job);
-  await assignGraphToAgent(ctx, job);
-  return Response.json(graphResponse(ctx, job));
+  const current = await ctx.getGraphJob(jobId);
+  if (!current || current.state !== 'planned') return current
+    ? Response.json(graphResponse(ctx, current)) : Response.json({ error: 'Graph job not found' }, { status: 404 });
+  if (current.batch_id && (await ctx.storage.get<{ state: string }>(`batch:${current.batch_id}`))?.state !== 'running') {
+    return Response.json({ code: 'BATCH_NOT_RUNNING' }, { status: 409 });
+  }
+  if (current.state !== 'planned') return Response.json(graphResponse(ctx, current));
+  current.state = 'queued';
+  current.updated_at = new Date().toISOString();
+  await ctx.saveGraphJob(current);
+  if (dispatch) await ctx.assignQueuedWork();
+  return Response.json(graphResponse(ctx, current));
 }
 
 export async function handleGetGraphJob(ctx: RelayContext, jobId: string): Promise<Response> {
@@ -718,17 +710,39 @@ export async function handleCancelGraphJob(ctx: RelayContext, jobId: string): Pr
   await ctx.saveGraphJob(job);
   ctx.graphJobs.delete(jobId);
   await ctx.scheduleGraphWebhookIfNeeded(job);
+  await ctx.assignQueuedWork();
   return Response.json(graphResponse(ctx, job));
 }
 
-export async function handleRetryGraphJob(ctx: RelayContext, jobId: string): Promise<Response> {
+export async function handleRetryGraphJob(
+  ctx: RelayContext, jobId: string, dispatch = true, batchId?: string, maxAttempts?: number,
+): Promise<Response> {
+  const response = await withGraphAdmission(ctx.storage, () => retryGraphJob(ctx, jobId, batchId, maxAttempts));
+  if (dispatch && response.ok) {
+    await ctx.assignQueuedWork();
+    return handleGetGraphJob(ctx, jobId);
+  }
+  return response;
+}
+
+async function retryGraphJob(ctx: RelayContext, jobId: string, batchId?: string, maxAttempts?: number): Promise<Response> {
   const job = await ctx.getGraphJob(jobId);
   if (!job) return Response.json({ error: 'Graph job not found' }, { status: 404 });
+  if (job.batch_id && job.batch_id !== batchId) return Response.json({ error: 'Retry batch children through their parent batch' }, { status: 409 });
   if (hasLocalCustody(job)) return Response.json({ code: 'TERMINAL_RETRY_REQUIRES_NEW_EXECUTION' }, { status: 409 });
   if (!['failed', 'cancelled'].includes(job.state)) return Response.json({ error: 'Only failed or cancelled graph jobs can be retried' }, { status: 409 });
   if (job.state === 'cancelled' && job.agent_id) {
     return Response.json({ error: 'Graph cancellation is still settling on its worker' }, { status: 409 });
   }
+  const quota = await enforceGraphSubmissionQuotas(ctx, {
+    job: job.job, graph: job.graph, inputs: job.inputs, assets: job.assets,
+  }, job.user_id);
+  if (quota) return quota;
+  if (job.batch_id && (await ctx.storage.get<{ state: string }>(`batch:${job.batch_id}`))?.state !== 'running') {
+    return Response.json({ code: 'BATCH_NOT_RUNNING' }, { status: 409 });
+  }
+  if (!['failed', 'cancelled'].includes(job.state)) return Response.json({ error: 'Graph retry state changed' }, { status: 409 });
+  if (maxAttempts !== undefined) job.max_attempts = job.attempt + maxAttempts;
   job.state = 'queued';
   job.agent_id = null;
   job.error = null;
@@ -743,7 +757,6 @@ export async function handleRetryGraphJob(ctx: RelayContext, jobId: string): Pro
   job.run_manifest = null;
   job.metrics = null;
   await ctx.saveGraphJob(job);
-  await assignGraphToAgent(ctx, job);
   return Response.json(graphResponse(ctx, job));
 }
 
@@ -800,6 +813,19 @@ async function graphResultTarget(ctx: RelayContext, job: GraphJob, token: string
     && ['assigned', 'preflighting', 'running'].includes(current.state) ? current : null;
 }
 
+async function acceptGraphOutputIndex(ctx: RelayContext, job: GraphJob, message: GraphResultMessage, agentId: string | null): Promise<boolean> {
+  const names = new Set(message.artifacts.map((artifact) => artifact.name));
+  let error: string | null = null;
+  if (names.size !== message.artifacts.length || job.job.outputs.some((output) => !message.artifacts.some(
+    (artifact) => artifact.name === output.name && artifact.kind === 'graph.output'))) error = 'Worker did not return every declared graph output';
+  if (job.batch_id && new TextEncoder().encode(JSON.stringify(message.artifacts.filter((artifact) => artifact.kind === 'graph.output'))).length > 32_000) {
+    error = 'BATCH_OUTPUT_INDEX_TOO_LARGE';
+  }
+  if (!error) return true;
+  await handleGraphError(ctx, { type: 'graph_error', job_id: job.job_id, assignment_token: job.node_token, error }, agentId);
+  return false;
+}
+
 export async function handleGraphResult(
   ctx: RelayContext,
   message: GraphResultMessage,
@@ -837,13 +863,7 @@ export async function handleGraphResult(
       error: 'Worker returned an invalid graph run manifest' }, agentId);
     return;
   }
-  const names = new Set(message.artifacts.map((artifact) => artifact.name));
-  if (names.size !== message.artifacts.length
-      || job.job.outputs.some((output) => !message.artifacts.some((artifact) => artifact.name === output.name && artifact.kind === 'graph.output'))) {
-    await handleGraphError(ctx, { type: 'graph_error', job_id: job.job_id, assignment_token: assignmentToken,
-      error: 'Worker did not return every declared graph output' }, agentId);
-    return;
-  }
+  if (!(await acceptGraphOutputIndex(ctx, job, message, agentId))) return;
   const artifactError = await graphArtifactError(ctx, job, message.artifacts);
   if (artifactError) {
     await handleGraphError(ctx, { type: 'graph_error', job_id: job.job_id, assignment_token: assignmentToken,

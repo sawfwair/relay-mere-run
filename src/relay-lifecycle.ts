@@ -1,4 +1,4 @@
-import type { AgentInfo } from './types';
+import type { AgentInfo, GraphJob } from './types';
 import type { RelayContext, WebSocketAttachment } from './relay-context';
 import { buildChatReceiptBase, buildGraphReceipt } from './relay-receipts';
 
@@ -12,6 +12,14 @@ export function releaseAgent(ctx: RelayContext, agentId: string | null): void {
   if (agent) {
     ctx.updateAgentInfo(agent.ws, { status: 'online', current_job_id: null });
   }
+}
+
+export function resetGraphAttempt(graph: GraphJob): void {
+  if (graph.batch_id) graph.node_token = crypto.randomUUID().replaceAll('-', '');
+  graph.events = [];
+  graph.last_event_sequence = -1;
+  graph.run_manifest = null;
+  graph.metrics = null;
 }
 
 export async function forwardMessageToOwnerIfNeeded(
@@ -289,6 +297,7 @@ export async function failInProgressWork(
     && (graph.state === 'assigned' || graph.state === 'running' || graph.state === 'preflighting')
   ) {
     if (graph.attempt < graph.max_attempts) {
+      resetGraphAttempt(graph);
       graph.state = 'queued';
       graph.agent_id = null;
       graph.assigned_device_id = undefined;

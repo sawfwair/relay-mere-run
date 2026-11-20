@@ -40,6 +40,7 @@ const graphProviderCapabilitySchema = z.object({
 }).passthrough();
 
 const graphWorkerCapabilitiesSchema = z.object({
+  assignment_tokens: z.boolean().optional(),
   schema_version: z.number(),
   worker_version: z.string(),
   contract_versions: z.array(z.string()),
