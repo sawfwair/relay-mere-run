@@ -219,6 +219,7 @@ export interface RelayExecutionReceipt {
 }
 
 export interface SubmitChatRequest {
+  chat_id?: string;
   messages: ChatMessage[];
   max_tokens?: number;
   temperature?: number;

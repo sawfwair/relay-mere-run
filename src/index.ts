@@ -475,7 +475,7 @@ async function handleAuthenticatedClientApi(request: Request, env: Env, path: st
     if (denial) return denial;
   }
   const response = await handleClientApi(request, env, auth.user_id);
-  return auth.execution_grant && path === '/graph-jobs' && request.method === 'POST'
+  return auth.execution_grant && ['/graph-jobs', '/chat'].includes(path) && request.method === 'POST'
     ? restrictExecutionResponse(response, auth.execution_grant)
     : response;
 }

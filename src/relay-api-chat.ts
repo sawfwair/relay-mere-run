@@ -2,24 +2,17 @@ import type { RelayContext } from './relay-context';
 import type {
   Chat,
   SubmitChatRequest,
-  SubmitChatResponse,
   ChatStatusResponse,
 } from './types';
 import {
   assignChatToAgent,
-  hasCapableAgentForChat,
   getChatQueuePosition,
 } from './relay-queue';
-import { finishSubmission } from './relay-api-common';
 import { buildCancelResponse } from './relay-api-common';
-import { sha256Json } from './execution';
+import { chatRequestContent, sha256Json } from './execution';
 import { cancelWork } from './relay-lifecycle';
 import { buildChatReceiptBase } from './relay-receipts';
-
-interface ChatIdempotencyRecord {
-  chat_id: string;
-  request_sha256: string;
-}
+import { reserveChat } from './relay-chat-admission';
 
 function repeatedSubmission(chat: Chat): Response {
   const status = chat.status === 'processing' ? 'assigned' : chat.status;
@@ -47,32 +40,9 @@ export async function handleSubmitChat(
       code: 'ADAPTER_BASE_MODEL_MISMATCH',
     }, { status: 400 });
   }
-  const requestSha256 = await sha256Json({
-    messages: request.messages,
-    max_tokens: request.max_tokens,
-    temperature: request.temperature,
-    requires_json: request.requires_json,
-    adapter: request.adapter,
-    required_device_id: request.required_device_id,
-    execution_spec_sha256: request.execution_spec_sha256,
-    identity: request.identity,
-    model: request.model,
-  });
+  const requestSha256 = await sha256Json(chatRequestContent(request));
   const idempotencyKey = request.idempotency_key?.trim();
-  if (idempotencyKey) {
-    const existing = await ctx.storage.get<ChatIdempotencyRecord>(`chat-idempotency:${idempotencyKey}`);
-    if (existing) {
-      if (existing.request_sha256 !== requestSha256) {
-        return Response.json({
-          error: 'Idempotency key was already used for a different request.',
-          code: 'IDEMPOTENCY_CONFLICT',
-        }, { status: 409 });
-      }
-      const existingChat = await ctx.getChat(existing.chat_id);
-      if (existingChat) return repeatedSubmission(existingChat);
-    }
-  }
-  const chatId = `chat_${crypto.randomUUID().slice(0, 12)}`;
+  const chatId = request.chat_id ?? `chat_${crypto.randomUUID().slice(0, 12)}`;
   const chat: Chat = {
     chat_id: chatId,
     user_id: userId,
@@ -100,34 +70,16 @@ export async function handleSubmitChat(
     execution_receipt: null,
   };
 
-  await ctx.saveChat(chat);
-  if (idempotencyKey) {
-    await ctx.storage.put(`chat-idempotency:${idempotencyKey}`, {
-      chat_id: chatId,
-      request_sha256: requestSha256,
-    } satisfies ChatIdempotencyRecord);
+  const reservation = await reserveChat(ctx, chat);
+  if (reservation.kind === 'denied') {
+    return Response.json({ error: reservation.code, code: reservation.code }, { status: reservation.status });
   }
-
-  return finishSubmission<SubmitChatResponse>({
-    ctx,
-    storageKey: `chat:${chatId}`,
-    removeFromMemory: () => {
-      ctx.chats.delete(chatId);
-    },
-    assign: () => assignChatToAgent(ctx, chat),
-    hasCapableAgent: () => hasCapableAgentForChat(ctx, chat),
-    getQueuePosition: () => getChatQueuePosition(ctx, chatId),
-    buildAssignedResponse: () => ({
-      chat_id: chatId,
-      status: 'assigned',
-      agent_id: chat.agent_id!,
-    }),
-    buildQueuedResponse: (position) => ({
-      chat_id: chatId,
-      status: 'queued',
-      position,
-    }),
-  });
+  if (reservation.kind === 'replay') return repeatedSubmission(reservation.chat);
+  ctx.chats.set(chatId, chat);
+  if (await assignChatToAgent(ctx, chat)) return repeatedSubmission(chat);
+  // Once admitted, a disconnect must not erase an execution another caller
+  // has already received. Reconnect/queue recovery retains the reserved ID.
+  return Response.json({ chat_id: chatId, status: 'queued', position: getChatQueuePosition(ctx, chatId) });
 }
 
 export async function handleGetChat(ctx: RelayContext, chatId: string): Promise<Response> {
