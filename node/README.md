@@ -108,6 +108,11 @@ public route from the repo root.
 ./scripts/release-node-linux.sh    # run on x86_64 or arm64 Linux
 ```
 
+The released macOS app checks for signed Sparkle updates in the background and
+restarts to install them when the node is idle. You can also use **Help > Check
+for Updates…**. Install the first Sparkle-enabled DMG manually if you're using
+Node 0.2.23 or earlier. See [the macOS release runbook](../docs/release-node-macos.md).
+
 Linux artifacts are architecture-specific. Debian packages are the recommended
 Ubuntu/Debian install and AppImages remain the portable fallback. Arm64 is a
 first-class release target for DGX Spark/Blackwell-class machines. Details live in
