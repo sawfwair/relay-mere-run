@@ -8,6 +8,7 @@ const checks = [
   ['policy', ['check:policy']],
   ['open source policy', ['check:opensource']],
   ['node tests', ['test:node']],
+  ['node release manifest tests', ['exec', 'node', '--test', 'scripts/node-release-manifest.test.mjs']],
 ];
 const workerCheck = ['worker tests', ['test']];
 
