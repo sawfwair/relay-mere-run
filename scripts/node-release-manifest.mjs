@@ -23,10 +23,12 @@ const validateRelease = ({ version, platform, arch, format, key, filename, conte
     ? 'releases/mere-run-node/macos/'
     : `releases/mere-run-node/linux/${arch}/${format === 'deb' ? 'deb/' : ''}`;
   const relativeKey = key.slice(expectedPrefix.length);
+  const isSparkleArtifact = platform === 'macos' && arch === 'aarch64' &&
+    relativeKey === `updates/${sha256}/mere.run-node-${version}-${arch}-notarized.dmg`;
   if (
     !key.startsWith(expectedPrefix) ||
     !relativeKey ||
-    relativeKey.includes('/') ||
+    (relativeKey.includes('/') && !isSparkleArtifact) ||
     key.includes('..') ||
     key.endsWith('/latest.json')
   ) {
