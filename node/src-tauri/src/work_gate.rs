@@ -133,6 +133,20 @@ impl DeviceWorkGate {
             _permit: permit,
         })
     }
+
+    #[cfg(any(target_os = "macos", test))]
+    pub fn try_reserve_update(&self) -> Option<WorkPermit> {
+        let permit = self.semaphore.clone().try_acquire_owned().ok()?;
+        self.state.send_modify(|state| {
+            state.busy = true;
+            state.source = "node-update".to_string();
+            state.work_id = "updating".to_string();
+        });
+        Some(WorkPermit {
+            gate: self.clone(),
+            _permit: permit,
+        })
+    }
 }
 
 pub struct WorkPermit {
@@ -222,5 +236,23 @@ mod tests {
 
         gate.begin_drain();
         assert!(gate.try_acquire("relay", "asr-stream-3").is_none());
+    }
+
+    #[test]
+    fn update_waits_for_active_work_and_keeps_the_gate_reserved() {
+        let gate = DeviceWorkGate::default();
+        let active = gate.try_acquire("relay", "graph-1").unwrap();
+        assert!(gate.try_reserve_update().is_none());
+
+        gate.begin_drain();
+        drop(active);
+        let update = gate.try_reserve_update().unwrap();
+        assert!(!gate.is_accepting());
+        gate.resume();
+        assert_eq!(gate.current().work_id, "updating");
+        assert!(gate.try_acquire("relay", "graph-2").is_none());
+
+        drop(update);
+        assert!(gate.try_acquire("relay", "graph-2").is_some());
     }
 }

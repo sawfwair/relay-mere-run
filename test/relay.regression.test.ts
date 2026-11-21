@@ -53,6 +53,41 @@ afterEach(() => {
 });
 
 describe('relay regressions', () => {
+  it('serves the macOS Sparkle feed and its immutable enclosure', async () => {
+    const prefix = 'releases/mere-run-node/macos/updates/';
+    const url = 'https://relay/downloads/mere-run-node/macos/updates/';
+    const archive = `${'a'.repeat(64)}/mere.run-node-0.2.24-aarch64-notarized.dmg`;
+    const feed = '<?xml version="1.0"?><rss/>';
+    const missingFeed = await SELF.fetch(`${url}appcast.xml`);
+    expect(missingFeed.status).toBe(404);
+    expect(missingFeed.headers.get('Cache-Control')).toBe('no-store');
+    await testEnv.IMAGES.put(`${prefix}appcast.xml`, feed);
+    await testEnv.IMAGES.put(`${prefix}${archive}`, 'disk-image');
+    await testEnv.IMAGES.put(`${prefix}private.txt`, 'private content');
+
+    const appcast = await SELF.fetch(`${url}appcast.xml`);
+    expect(appcast.status).toBe(200);
+    expect(appcast.headers.get('Content-Type')).toBe('application/rss+xml; charset=utf-8');
+    expect(appcast.headers.get('Cache-Control')).toBe('no-store');
+    expect(await appcast.text()).toBe(feed);
+
+    const appcastHead = await SELF.fetch(`${url}appcast.xml`, { method: 'HEAD' });
+    expect(appcastHead.headers.get('Content-Length')).toBe(String(feed.length));
+    expect(await appcastHead.text()).toBe('');
+
+    const dmg = await SELF.fetch(`${url}${archive}`, { method: 'HEAD' });
+    expect(dmg.status).toBe(200);
+    expect(dmg.headers.get('Content-Type')).toBe('application/x-apple-diskimage');
+    expect(dmg.headers.get('Cache-Control')).toContain('immutable');
+    expect(dmg.headers.get('Content-Length')).toBe('10');
+
+    const partial = await SELF.fetch(`${url}${archive}`, { headers: { Range: 'bytes=0-3' } });
+    expect(partial.status).toBe(206);
+    expect(partial.headers.get('Content-Range')).toBe('bytes 0-3/10');
+    expect(new Uint8Array(await partial.arrayBuffer())).toEqual(new TextEncoder().encode('disk'));
+    expect((await SELF.fetch(`${url}private.txt`)).status).toBe(404);
+  });
+
   it('forwards Animatic video controls to the assigned Node', async () => {
     const userId = newUserId('video-controls');
     const { relay, ws } = await connectAgent(

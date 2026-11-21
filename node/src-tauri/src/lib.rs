@@ -17,6 +17,8 @@ mod process_activity;
 mod protocol;
 mod resident_video;
 mod runtime_binary;
+#[cfg(target_os = "macos")]
+mod sparkle;
 mod work_gate;
 
 use std::path::PathBuf;
@@ -481,6 +483,9 @@ pub fn run() {
         .manage(NodeState::default())
         .manage(work_gate::DeviceWorkGate::default())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            sparkle::install(app)?;
+
             if let Err(error) = config::remove_legacy_direct_executor_state(app.handle()) {
                 let _ = app.emit(
                     "node:log",

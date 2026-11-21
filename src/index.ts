@@ -20,6 +20,9 @@ export { MereRunRelay };
 const AGENT_PATHS = new Set(['/agent', '/zero-agent']);
 const PUBLIC_MEDIA_PREFIX = '/media/';
 const PUBLIC_MEDIA_KEY_PREFIXES = ['relay/', 'inputs/', 'inputs-inline/'];
+const NODE_UPDATE_PATH = '/downloads/mere-run-node/macos/updates/';
+const NODE_UPDATE_KEY_PREFIX = 'releases/mere-run-node/macos/updates/';
+const NODE_UPDATE_DMG = /^[a-f0-9]{64}\/mere\.run-node-\d+\.\d+\.\d+-aarch64-notarized\.dmg$/u;
 
 type NodeReleaseFormat = 'dmg' | 'appimage' | 'deb';
 
@@ -448,6 +451,39 @@ async function handlePublicMedia(request: Request, env: Env, key: string): Promi
   return new Response(object.body, { headers });
 }
 
+async function handleNodeUpdate(request: Request, env: Env, filename: string): Promise<Response> {
+  if (filename === 'appcast.xml') {
+    const key = `${NODE_UPDATE_KEY_PREFIX}${filename}`;
+    const headOnly = request.method === 'HEAD';
+    const download = headOnly ? null : await env.IMAGES.get(key);
+    const object = headOnly ? await env.IMAGES.head(key) : download;
+    const headers = new Headers({ ...corsHeaders, 'Cache-Control': 'no-store' });
+    if (!object) return new Response(null, { status: 404, headers });
+    headers.set('Content-Type', 'application/rss+xml; charset=utf-8');
+    headers.set('Content-Length', String(object.size));
+    headers.set('X-Content-Type-Options', 'nosniff');
+    return new Response(download?.body, { headers });
+  }
+  if (!NODE_UPDATE_DMG.test(filename)) {
+    return new Response('Not Found', { status: 404 });
+  }
+
+  const response = await handlePublicMedia(request, env, `${NODE_UPDATE_KEY_PREFIX}${filename}`);
+  if (response.ok) response.headers.set('Content-Type', 'application/x-apple-diskimage');
+  return response;
+}
+
+function handlePublicDownload(request: Request, env: Env, pathname: string): Promise<Response> | null {
+  if (request.method !== 'GET' && request.method !== 'HEAD') return null;
+  if (pathname.startsWith(NODE_UPDATE_PATH)) {
+    return handleNodeUpdate(request, env, pathname.slice(NODE_UPDATE_PATH.length));
+  }
+  const channel = NODE_RELEASE_DOWNLOADS.get(pathname);
+  if (channel) return handleNodeReleaseDownload(request, env, channel);
+  const mediaKey = mediaObjectKey(pathname);
+  return mediaKey ? handlePublicMedia(request, env, mediaKey) : null;
+}
+
 async function handleGraphNodeRequest(request: Request, env: Env, pathname: string): Promise<Response> {
   const match = pathname.match(/^\/api\/graph-node\/([^/]+)\/([^/]+)\/([^/]+)\/(.+)$/);
   if (!match) return new Response('Not Found', { status: 404 });
@@ -551,15 +587,8 @@ export default {
       return relay.fetch(doRequest);
     }
 
-    const nodeReleaseDownload = NODE_RELEASE_DOWNLOADS.get(url.pathname);
-    if ((request.method === 'GET' || request.method === 'HEAD') && nodeReleaseDownload) {
-      return handleNodeReleaseDownload(request, env, nodeReleaseDownload);
-    }
-
-    const publicMediaKey = mediaObjectKey(url.pathname);
-    if ((request.method === 'GET' || request.method === 'HEAD') && publicMediaKey) {
-      return handlePublicMedia(request, env, publicMediaKey);
-    }
+    const download = handlePublicDownload(request, env, url.pathname);
+    if (download) return download;
 
     if (url.pathname.startsWith('/api/graph-node/')) {
       return withCors(await handleGraphNodeRequest(request, env, url.pathname));

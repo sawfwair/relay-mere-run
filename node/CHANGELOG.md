@@ -1,7 +1,10 @@
 # mere.run Node changelog
 
-## Unreleased
+## 0.2.24 - 2026-11-21
 
+- The macOS desktop app checks for signed updates with Sparkle and installs
+  them automatically when the node is idle. Use **Help > Check for Updates…**
+  to check manually.
 - Update the pinned `rustls` dependency to 0.23.46 to address
   RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348, and
   RUSTSEC-2026-0349.

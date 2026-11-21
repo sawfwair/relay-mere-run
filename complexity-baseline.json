@@ -7,7 +7,7 @@
     "src/client-api.ts::Async function 'handleClientApiUnchecked'": 171,
     "src/index.ts::Function 'parseNodeReleaseManifest'": 25,
     "src/index.ts::Async function 'handlePublicMedia'": 25,
-    "src/index.ts::Async method 'fetch'": 46,
+    "src/index.ts::Async method 'fetch'": 41,
     "src/relay-agent-job.ts::Async function 'handleResult'": 21,
     "src/relay-api-graph.ts::Function 'validateCreateRequest'": 108,
     "src/relay-api-graph.ts::Async function 'handleGraphResult'": 23,
