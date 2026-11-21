@@ -139,6 +139,9 @@ KEY="$UPDATE_PREFIX/$sha256/$ARCHIVE_NAME"
 update_url="$UPDATE_BASE_URL/$sha256/$ARCHIVE_NAME"
 ditto "$DMG_PATH" "$appcast_dir/$ARCHIVE_NAME"
 generate_node_appcast "$appcast_dir/$ARCHIVE_NAME" "$sparkle_dir" "$SPARKLE_KEY_FILE" "$update_url" "$VERSION"
+tmp_manifest="$work_dir/latest.json"
+node scripts/node-release-manifest.mjs write \
+  "$tmp_manifest" "$VERSION" macos "$ARCH" "$KEY" "$FILENAME" "$CONTENT_TYPE" "$size" "$sha256" dmg
 
 echo "Uploading to remote R2..."
 echo "  bucket: $BUCKET"
@@ -151,7 +154,6 @@ echo "  file:   $DMG_PATH"
 
 tmp_dmg="$work_dir/remote.dmg"
 tmp_headers="$work_dir/headers"
-tmp_manifest="$work_dir/latest.json"
 tmp_remote_manifest="$work_dir/remote-latest.json"
 tmp_catalog="$work_dir/catalog.json"
 
@@ -171,8 +173,6 @@ if [[ "$public_sha256" != "$sha256" ]]; then
 fi
 
 echo "Promoting the verified DMG as the latest macOS node release..."
-node scripts/node-release-manifest.mjs write \
-  "$tmp_manifest" "$VERSION" macos "$ARCH" "$KEY" "$FILENAME" "$CONTENT_TYPE" "$size" "$sha256" dmg
 "$WRANGLER_BIN" r2 object put "$BUCKET/$MANIFEST_KEY" \
   --file "$tmp_manifest" \
   --content-type "application/json" \
